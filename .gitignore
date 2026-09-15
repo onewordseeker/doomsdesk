@@ -1,0 +1,29 @@
+node_modules/
+.env
+.env.*
+dist/
+out/
+build/
+
+# Next.js
+packages/web/.next/
+packages/web/out/
+
+# Tauri
+packages/desktop/src-tauri/target/
+packages/desktop/dist/
+packages/desktop/build/
+
+# Server
+packages/server/dist/
+packages/server/*.db
+packages/server/*.db-shm
+packages/server/*.db-wal
+
+# Logs
+*.log
+npm-debug.log*
+
+# macOS
+.DS_Store
+.AppleDouble

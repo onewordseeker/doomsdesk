@@ -1,0 +1,8 @@
+packages:
+  - 'packages/*'
+allowBuilds:
+  better-sqlite3: true
+  electron: true
+  esbuild: true
+  '@next/swc-darwin-arm64': true
+  electron-builder: true

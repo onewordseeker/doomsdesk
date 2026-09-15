@@ -1,0 +1,11 @@
+{
+  "name": "doomsdesk",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "dev:server": "pnpm --filter @doomsdesk/server dev",
+    "dev:web": "pnpm --filter @doomsdesk/web dev",
+    "dev:desktop": "pnpm --filter @doomsdesk/desktop dev",
+    "build:all": "pnpm -r build"
+  }
+}

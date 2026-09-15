@@ -1,0 +1,97 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    --background: #F8FAFC;
+    --surface: #FFFFFF;
+    --border: #E2E8F0;
+    --text: #1A202C;
+    --muted: #718096;
+  }
+
+  .dark {
+    --background: #0F1117;
+    --surface: #1A1F2E;
+    --border: #2D3748;
+    --text: #E2E8F0;
+    --muted: #718096;
+  }
+
+  * {
+    box-sizing: border-box;
+  }
+
+  html {
+    scroll-behavior: smooth;
+  }
+
+  body {
+    background-color: var(--background);
+    color: var(--text);
+    transition: background-color 0.2s ease, color 0.2s ease;
+  }
+
+  /* Custom scrollbar */
+  ::-webkit-scrollbar {
+    width: 5px;
+    height: 5px;
+  }
+
+  ::-webkit-scrollbar-track {
+    background: transparent;
+  }
+
+  ::-webkit-scrollbar-thumb {
+    background: #2D3748;
+    border-radius: 999px;
+  }
+
+  ::-webkit-scrollbar-thumb:hover {
+    background: #4A5568;
+  }
+
+  /* Focus ring */
+  *:focus-visible {
+    outline: 2px solid #6366F1;
+    outline-offset: 2px;
+    border-radius: 4px;
+  }
+}
+
+@layer components {
+  /* Light mode surface overrides */
+  .light body {
+    background-color: #F8FAFC;
+    color: #1A202C;
+  }
+
+  /* Card base */
+  .card {
+    @apply rounded-xl border bg-dark-surface border-dark-border;
+  }
+
+  /* Input base */
+  .input-base {
+    @apply w-full px-3 py-2.5 rounded-lg border text-sm transition-all duration-150 outline-none;
+    @apply bg-dark-bg border-dark-border text-dark-text placeholder:text-dark-muted;
+    @apply focus:border-accent focus:ring-1 focus:ring-accent/30;
+  }
+
+  /* Button base */
+  .btn-primary {
+    @apply px-4 py-2.5 rounded-lg text-sm font-semibold text-white bg-accent hover:bg-accent-hover transition-all duration-150;
+    @apply focus:ring-2 focus:ring-accent/40 active:scale-[0.98];
+  }
+
+  .btn-secondary {
+    @apply px-4 py-2.5 rounded-lg text-sm font-medium text-dark-text border border-dark-border;
+    @apply hover:bg-dark-border/40 transition-all duration-150 active:scale-[0.98];
+  }
+
+  .btn-danger {
+    @apply px-4 py-2.5 rounded-lg text-sm font-medium text-danger border border-danger/30;
+    @apply hover:bg-danger/10 transition-all duration-150 active:scale-[0.98];
+  }
+}

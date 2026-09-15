@@ -1,0 +1,18 @@
+{
+  "$schema": "../node_modules/@tauri-apps/cli/schema/acl/capability.json",
+  "identifier": "default",
+  "description": "Default capability for DoomsDesk",
+  "windows": ["main", "agent-banner"],
+  "permissions": [
+    "core:default",
+    "core:window:allow-set-fullscreen",
+    "core:window:allow-is-fullscreen",
+    "core:window:allow-close",
+    "core:window:allow-show",
+    "core:window:allow-hide",
+    "shell:allow-open",
+    "dialog:allow-ask",
+    "dialog:allow-message",
+    "opener:allow-open-url"
+  ]
+}
