@@ -132,7 +132,7 @@ export default function Session({ peerId, role, onEnd }: Props) {
           if (sender.track?.kind === 'video') {
             const params = sender.getParameters()
             if (!params.encodings.length) params.encodings = [{}]
-            params.encodings[0].maxBitrate = 8_000_000
+            params.encodings[0].maxBitrate = 15_000_000
             sender.setParameters(params).catch(() => {})
           }
         }
@@ -148,64 +148,90 @@ export default function Session({ peerId, role, onEnd }: Props) {
   }
 
   async function setupAgentSide(pc: RTCPeerConnection) {
-    diag('starting native screen capture')
+    diag('starting canvas screen capture')
 
-    // Create an offscreen canvas — Rust will push JPEG frames into it
     const canvas = document.createElement('canvas')
     canvas.width = window.screen.width
     canvas.height = window.screen.height
-    const ctx = canvas.getContext('2d')!
+    const ctx = canvas.getContext('2d', { alpha: false })!
 
-    // Stream from the canvas into the RTCPeerConnection at 30fps
     const stream = (canvas as any).captureStream(30) as MediaStream
     streamRef.current = stream
-    // addTransceiver sets encoding params before SDP negotiation — more reliable than setParameters
+
+    let transceiver: RTCRtpTransceiver | null = null
     for (const track of stream.getTracks()) {
       if (track.kind === 'video') {
-        pc.addTransceiver(track, {
+        transceiver = pc.addTransceiver(track, {
           direction: 'sendonly',
           streams: [stream],
-          sendEncodings: [{ maxBitrate: 8_000_000, maxFramerate: 30 }],
+          sendEncodings: [{ maxBitrate: 15_000_000, maxFramerate: 30 }],
         })
       } else {
         pc.addTrack(track, stream)
       }
     }
-    diag('canvas stream added to PC')
 
+    // Prefer H264: hardware-accelerated via VideoToolbox (macOS) and MediaFoundation (Windows)
+    try {
+      const caps = RTCRtpSender.getCapabilities?.('video')
+      if (transceiver?.setCodecPreferences && caps) {
+        const h264 = caps.codecs.filter(c => c.mimeType.toLowerCase() === 'video/h264')
+        const rest = caps.codecs.filter(c => c.mimeType.toLowerCase() !== 'video/h264')
+        if (h264.length) transceiver.setCodecPreferences([...h264, ...rest])
+        diag(`codec pref: H264 x${h264.length} (${h264[0]?.sdpFmtpLine ?? ''})`)
+      }
+    } catch {}
+
+    diag('canvas stream added to PC')
     setRemoteScreenSize({ width: window.screen.width, height: window.screen.height })
     origScreenRef.current = { width: window.screen.width, height: window.screen.height }
 
-    // Receive JPEG frames from Rust and paint onto the canvas.
-    // Use img.decode() (async, resolves after GPU upload) and skip stale frames
-    // so a slow decode never blocks a newer frame from painting.
+    // RAF paint loop: canvas is updated on the display vsync, decoupled from IPC jitter.
+    // createImageBitmap decodes JPEG off the main thread; the RAF callback draws it instantly.
+    let latestBitmap: ImageBitmap | null = null
     let frameSeq = 0
-    const unsubFrame = listen<string>('screen-frame', async (e) => {
+    let rafId = 0
+    const rafPaint = () => {
+      if (latestBitmap) {
+        if (canvas.width !== latestBitmap.width || canvas.height !== latestBitmap.height) {
+          canvas.width = latestBitmap.width
+          canvas.height = latestBitmap.height
+        }
+        ctx.drawImage(latestBitmap, 0, 0)
+        latestBitmap.close()
+        latestBitmap = null
+      }
+      rafId = requestAnimationFrame(rafPaint)
+    }
+    rafId = requestAnimationFrame(rafPaint)
+
+    const agentCleanups: Array<() => void> = [() => cancelAnimationFrame(rafId)]
+
+    const frameUnsub = await listen<string>('screen-frame', async (e) => {
       const mySeq = ++frameSeq
       try {
-        const img = new Image()
-        img.src = `data:image/jpeg;base64,${e.payload}`
-        await img.decode()
-        if (mySeq < frameSeq) return // newer frame already decoded, skip this one
-        if (canvas.width !== img.naturalWidth || canvas.height !== img.naturalHeight) {
-          canvas.width = img.naturalWidth
-          canvas.height = img.naturalHeight
-        }
-        ctx.drawImage(img, 0, 0)
+        const binaryStr = atob(e.payload)
+        const bytes = new Uint8Array(binaryStr.length)
+        for (let i = 0; i < binaryStr.length; i++) bytes[i] = binaryStr.charCodeAt(i)
+        const blob = new Blob([bytes], { type: 'image/jpeg' })
+        const bitmap = await createImageBitmap(blob)
+        if (mySeq < frameSeq) { bitmap.close(); return }
+        latestBitmap?.close()
+        latestBitmap = bitmap
       } catch {}
     })
-    ;(streamRef as any).unsubFrame = unsubFrame
+    agentCleanups.push(frameUnsub)
 
-    const unsubErr = listen<string>('screen-frame-error', () => {
+    const errUnsub = await listen<string>('screen-frame-error', () => {
       diag('native capture failed — check Screen Recording permission in System Settings')
     })
-    ;(streamRef as any).unsubErr = unsubErr
+    agentCleanups.push(errUnsub)
 
-    // Start the Rust capture loop
+    ;(streamRef as any)._agentCleanup = () => agentCleanups.forEach(f => f())
+
     await invoke('start_native_capture')
     diag('native capture started')
 
-    // Data channel for input injection
     const dc = pc.createDataChannel('input')
     setDataChannel(dc)
     dcRef.current = dc
@@ -230,7 +256,6 @@ export default function Session({ peerId, role, onEnd }: Props) {
       )
     }
 
-    // Watch for display resolution changes
     let lastW = window.screen.width, lastH = window.screen.height
     screenCheckRef.current = setInterval(() => {
       const w = window.screen.width, h = window.screen.height
@@ -327,9 +352,7 @@ export default function Session({ peerId, role, onEnd }: Props) {
     clearInterval(screenCheckRef.current)
     if (role === 'agent') {
       invoke('stop_native_capture').catch(() => {})
-      const sr = streamRef.current as any
-      if (sr?.unsubFrame) sr.unsubFrame()
-      if (sr?.unsubErr) sr.unsubErr()
+      ;(streamRef.current as any)?._agentCleanup?.()
     }
     streamRef.current?.getTracks().forEach((t) => t.stop())
     streamRef.current = null

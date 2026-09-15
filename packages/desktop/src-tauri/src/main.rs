@@ -219,7 +219,7 @@ async fn start_native_capture(app: AppHandle, state: State<'_, AppState>) -> Res
 
                 let rgb = dyn_img.to_rgb8();
                 let mut jpeg_buf = Vec::new();
-                let mut enc = JpegEncoder::new_with_quality(&mut jpeg_buf, 80);
+                let mut enc = JpegEncoder::new_with_quality(&mut jpeg_buf, 85);
                 enc.encode_image(&rgb).ok()?;
 
                 let b64 = base64::engine::general_purpose::STANDARD.encode(&jpeg_buf);
