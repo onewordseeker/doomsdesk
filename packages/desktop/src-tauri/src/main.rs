@@ -10,7 +10,7 @@ use input::InputWorker;
 use serde_json::Value;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use tauri::{
     menu::{Menu, MenuItem},
     tray::{MouseButton, TrayIconBuilder, TrayIconEvent},
@@ -28,6 +28,7 @@ struct AppState {
     resource_dir: Mutex<PathBuf>,
     permanent_password: Mutex<String>,
     capture_running: Arc<AtomicBool>,
+    capture_quality: Arc<AtomicU8>,
 }
 
 // ── Commands ──────────────────────────────────────────────────────────────────
@@ -186,6 +187,7 @@ async fn start_native_capture(app: AppHandle, state: State<'_, AppState>) -> Res
     use base64::Engine;
 
     let running = state.capture_running.clone();
+    let quality_ref = state.capture_quality.clone();
     if running.swap(true, Ordering::SeqCst) {
         return Ok(()); // Already running
     }
@@ -218,8 +220,9 @@ async fn start_native_capture(app: AppHandle, state: State<'_, AppState>) -> Res
                 };
 
                 let rgb = dyn_img.to_rgb8();
+                let quality = quality_ref.load(Ordering::Relaxed);
                 let mut jpeg_buf = Vec::new();
-                let mut enc = JpegEncoder::new_with_quality(&mut jpeg_buf, 85);
+                let mut enc = JpegEncoder::new_with_quality(&mut jpeg_buf, quality);
                 enc.encode_image(&rgb).ok()?;
 
                 let b64 = base64::engine::general_purpose::STANDARD.encode(&jpeg_buf);
@@ -241,6 +244,12 @@ async fn start_native_capture(app: AppHandle, state: State<'_, AppState>) -> Res
 #[tauri::command]
 fn stop_native_capture(state: State<'_, AppState>) {
     state.capture_running.store(false, Ordering::SeqCst);
+}
+
+#[tauri::command]
+fn set_capture_quality(state: State<'_, AppState>, quality: u8) {
+    let clamped = quality.clamp(20, 95);
+    state.capture_quality.store(clamped, Ordering::Relaxed);
 }
 
 // ── Main ──────────────────────────────────────────────────────────────────────
@@ -283,6 +292,7 @@ fn main() {
                 resource_dir: Mutex::new(resource_dir),
                 permanent_password: Mutex::new(perm_pw.clone()),
                 capture_running: Arc::new(AtomicBool::new(false)),
+                capture_quality: Arc::new(AtomicU8::new(80)),
             });
 
             // Start signaling loop
@@ -326,6 +336,7 @@ fn main() {
             forward_agent_log,
             start_native_capture,
             stop_native_capture,
+            set_capture_quality,
         ])
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {

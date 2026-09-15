@@ -168,7 +168,8 @@ export default function Session({ peerId, role, onEnd }: Props) {
     }
 
     inputDc.onopen = () => {
-      diag('input DC open — sending screen_info')
+      diag('input DC open — starting input worker, sending screen_info')
+      invoke('start_input_worker').catch(() => {})
       inputDc.send(
         JSON.stringify({ type: 'screen_info', width: window.screen.width, height: window.screen.height })
       )
@@ -182,14 +183,50 @@ export default function Session({ peerId, role, onEnd }: Props) {
 
     const agentCleanups: Array<() => void> = []
 
+    // Auto-quality: adapt JPEG quality based on send vs skip ratio every 3s
+    let framesSent = 0
+    let framesSkipped = 0
+    let currentQuality = 80
+    let stableWindows = 0
+
+    const qualityInterval = setInterval(() => {
+      const total = framesSent + framesSkipped
+      if (total === 0) return
+      const skipRate = framesSkipped / total
+      diag(`frames sent=${framesSent} skipped=${framesSkipped} skip%=${Math.round(skipRate*100)} q=${currentQuality}`)
+      if (skipRate > 0.2 && currentQuality > 40) {
+        currentQuality = Math.max(40, currentQuality - 10)
+        invoke('set_capture_quality', { quality: currentQuality }).catch(() => {})
+        stableWindows = 0
+        diag(`quality ↓ ${currentQuality}`)
+      } else if (skipRate === 0) {
+        stableWindows++
+        if (stableWindows >= 2 && currentQuality < 85) {
+          currentQuality = Math.min(85, currentQuality + 5)
+          invoke('set_capture_quality', { quality: currentQuality }).catch(() => {})
+          stableWindows = 0
+          diag(`quality ↑ ${currentQuality}`)
+        }
+      } else {
+        stableWindows = 0
+      }
+      framesSent = 0
+      framesSkipped = 0
+    }, 3000)
+    agentCleanups.push(() => clearInterval(qualityInterval))
+
     // Forward Rust JPEG frames as binary over frames DC
     const frameUnsub = await listen<string>('screen-frame', (e) => {
       if (framesDc.readyState !== 'open') return
       // Skip frame if buffer is backing up — prevents unbounded latency on slow links
-      if (framesDc.bufferedAmount > 524288) return
+      if (framesDc.bufferedAmount > 524288) {
+        framesSkipped++
+        return
+      }
       try {
         const bytes = Uint8Array.from(atob(e.payload), (c) => c.charCodeAt(0))
         framesDc.send(bytes)
+        framesSent++
       } catch {}
     })
     agentCleanups.push(frameUnsub)
@@ -295,6 +332,7 @@ export default function Session({ peerId, role, onEnd }: Props) {
     clearInterval(screenCheckRef.current)
     if (role === 'agent') {
       invoke('stop_native_capture').catch(() => {})
+      invoke('stop_input_worker').catch(() => {})
       agentCleanupRef.current?.()
       agentCleanupRef.current = null
     }
