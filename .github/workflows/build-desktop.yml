@@ -47,6 +47,7 @@ jobs:
         with:
           workspaces: packages/desktop/src-tauri -> target
           cache-on-failure: true
+          cache-all-crates: true
 
       - name: Install frontend dependencies
         run: pnpm install
@@ -95,17 +96,20 @@ jobs:
 
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
 
       - name: Cache Rust dependencies
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: packages/desktop/src-tauri -> target
           cache-on-failure: true
+          cache-all-crates: true
 
       - name: Install frontend dependencies
         run: pnpm install
 
-      - name: Build Tauri (macOS)
+      - name: Build Tauri (macOS universal)
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -122,8 +126,9 @@ jobs:
 
             **macOS users:** If you see "damaged" error, open Terminal and run:
             ```
-            xattr -cr ~/Downloads/DoomsDesk_1.0.0_aarch64.dmg
+            xattr -cr ~/Downloads/DoomsDesk.dmg
             ```
             Then open the .dmg again.
           releaseDraft: false
           prerelease: false
+          args: --target universal-apple-darwin

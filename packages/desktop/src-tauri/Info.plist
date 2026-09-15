@@ -8,5 +8,7 @@
   <string>DoomsDesk may use the camera for video sessions.</string>
   <key>NSMicrophoneUsageDescription</key>
   <string>DoomsDesk may use the microphone for audio sessions.</string>
+  <key>NSAppSleepDisabled</key>
+  <true/>
 </dict>
 </plist>

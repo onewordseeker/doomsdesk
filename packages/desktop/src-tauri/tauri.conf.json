@@ -42,7 +42,8 @@
       "../resources/input-worker.ps1": "resources/input-worker.ps1"
     },
     "macOS": {
-      "signingIdentity": "-"
+      "signingIdentity": "-",
+      "infoPlist": "Info.plist"
     }
   }
 }

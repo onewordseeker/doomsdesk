@@ -31,6 +31,7 @@ export default function RemoteDisplay({ framesChannel, dataChannel, remoteScreen
     let rafId = 0
     let lastFrameAt = 0 // 0 = no frame received yet
     let hasReceivedFrame = false
+    let decodeGen = 0 // incremented per message; stale decodes discard their bitmap
 
     const rafPaint = () => {
       if (latestBitmap) {
@@ -52,6 +53,7 @@ export default function RemoteDisplay({ framesChannel, dataChannel, remoteScreen
       lastFrameAt = performance.now()
       setHasFrames(true)
       setFrozen(false)
+      const myGen = ++decodeGen
       try {
         // Decode base64 JPEG string → Blob → ImageBitmap (off main thread)
         const binaryStr = atob(e.data)
@@ -59,6 +61,8 @@ export default function RemoteDisplay({ framesChannel, dataChannel, remoteScreen
         for (let i = 0; i < binaryStr.length; i++) bytes[i] = binaryStr.charCodeAt(i)
         const blob = new Blob([bytes], { type: 'image/jpeg' })
         const bitmap = await createImageBitmap(blob)
+        // Discard if a newer frame already decoded — prevents stale bitmap pileup
+        if (myGen !== decodeGen) { bitmap.close(); return }
         latestBitmap?.close()
         latestBitmap = bitmap
       } catch {}

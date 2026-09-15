@@ -10,7 +10,7 @@ use input::InputWorker;
 use serde_json::Value;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
-use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicU8, Ordering};
 use tauri::{
     menu::{Menu, MenuItem},
     tray::{MouseButton, TrayIconBuilder, TrayIconEvent},
@@ -27,7 +27,7 @@ struct AppState {
     input_worker: Mutex<Option<InputWorker>>,
     resource_dir: Mutex<PathBuf>,
     permanent_password: Mutex<String>,
-    capture_running: Arc<AtomicBool>,
+    capture_generation: Arc<AtomicU64>,
     capture_quality: Arc<AtomicU8>,
 }
 
@@ -186,15 +186,16 @@ async fn start_native_capture(app: AppHandle, state: State<'_, AppState>) -> Res
     use screenshots::image::codecs::jpeg::JpegEncoder;
     use base64::Engine;
 
-    let running = state.capture_running.clone();
     let quality_ref = state.capture_quality.clone();
-    if running.swap(true, Ordering::SeqCst) {
-        return Ok(()); // Already running
-    }
+    let gen_ref = state.capture_generation.clone();
+
+    // Increment generation — any loop still running with the old gen will see
+    // the mismatch on its next iteration and exit cleanly, preventing double-loops.
+    let my_gen = gen_ref.fetch_add(1, Ordering::SeqCst) + 1;
 
     tauri::async_runtime::spawn_blocking(move || {
         loop {
-            if !running.load(Ordering::SeqCst) {
+            if gen_ref.load(Ordering::SeqCst) != my_gen {
                 break;
             }
 
@@ -243,7 +244,7 @@ async fn start_native_capture(app: AppHandle, state: State<'_, AppState>) -> Res
 
 #[tauri::command]
 fn stop_native_capture(state: State<'_, AppState>) {
-    state.capture_running.store(false, Ordering::SeqCst);
+    state.capture_generation.fetch_add(1, Ordering::SeqCst);
 }
 
 #[tauri::command]
@@ -291,7 +292,7 @@ fn main() {
                 input_worker: Mutex::new(None),
                 resource_dir: Mutex::new(resource_dir),
                 permanent_password: Mutex::new(perm_pw.clone()),
-                capture_running: Arc::new(AtomicBool::new(false)),
+                capture_generation: Arc::new(AtomicU64::new(0)),
                 capture_quality: Arc::new(AtomicU8::new(60)),
             });
 
