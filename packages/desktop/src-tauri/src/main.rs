@@ -292,7 +292,7 @@ fn main() {
                 resource_dir: Mutex::new(resource_dir),
                 permanent_password: Mutex::new(perm_pw.clone()),
                 capture_running: Arc::new(AtomicBool::new(false)),
-                capture_quality: Arc::new(AtomicU8::new(80)),
+                capture_quality: Arc::new(AtomicU8::new(60)),
             });
 
             // Start signaling loop

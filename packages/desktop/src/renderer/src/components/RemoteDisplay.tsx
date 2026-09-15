@@ -47,13 +47,17 @@ export default function RemoteDisplay({ framesChannel, dataChannel, remoteScreen
     rafId = requestAnimationFrame(rafPaint)
 
     const onMessage = async (e: MessageEvent) => {
-      if (!(e.data instanceof ArrayBuffer)) return
+      if (typeof e.data !== 'string') return
       hasReceivedFrame = true
       lastFrameAt = performance.now()
       setHasFrames(true)
       setFrozen(false)
       try {
-        const blob = new Blob([e.data], { type: 'image/jpeg' })
+        // Decode base64 JPEG string → Blob → ImageBitmap (off main thread)
+        const binaryStr = atob(e.data)
+        const bytes = new Uint8Array(binaryStr.length)
+        for (let i = 0; i < binaryStr.length; i++) bytes[i] = binaryStr.charCodeAt(i)
+        const blob = new Blob([bytes], { type: 'image/jpeg' })
         const bitmap = await createImageBitmap(blob)
         latestBitmap?.close()
         latestBitmap = bitmap
@@ -62,10 +66,10 @@ export default function RemoteDisplay({ framesChannel, dataChannel, remoteScreen
 
     framesChannel.addEventListener('message', onMessage)
 
-    // Stall watchdog: if frames stop arriving for 4s, show overlay and request restart
+    // Stall watchdog: if frames stop arriving for 8s, show overlay and request capture restart
     const stallId = setInterval(() => {
       if (!hasReceivedFrame) return
-      if (performance.now() - lastFrameAt > 4000) {
+      if (performance.now() - lastFrameAt > 8000) {
         setFrozen(true)
         lastFrameAt = performance.now()
         const dc = dcRef.current
@@ -237,10 +241,10 @@ export default function RemoteDisplay({ framesChannel, dataChannel, remoteScreen
         <div className="absolute inset-0 flex items-center justify-center bg-black/60 z-10 pointer-events-none">
           <div className="flex flex-col items-center gap-2 text-center px-6">
             <div className="w-8 h-8 border-2 border-slate-600 border-t-yellow-400 rounded-full animate-spin" />
-            <span className="text-yellow-400 text-sm font-semibold">Screen temporarily blocked</span>
+            <span className="text-yellow-400 text-sm font-semibold">Video stream paused</span>
             <span className="text-slate-400 text-xs leading-snug">
-              An elevated window (Task Manager, UAC prompt) is blocking capture.<br />
-              Close it on the remote to resume.
+              Network interruption or elevated window on remote.<br />
+              Resuming automatically…
             </span>
           </div>
         </div>

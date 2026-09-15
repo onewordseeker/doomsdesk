@@ -158,9 +158,10 @@ export default function Session({ peerId, role, onEnd }: Props) {
           diag(`display res → ${width}x${height}`)
           invoke('inject_input', { event: { type: 'set_display_resolution', width, height } })
         } else if (msg.type === 'restart_capture') {
-          diag('restart_capture received — restarting')
+          diag('restart_capture received — restarting capture')
           invoke('stop_native_capture').catch(() => {})
-          invoke('start_native_capture').catch(() => {})
+          // 150ms gap ensures old capture loop exits (checks every 33ms) before new one starts
+          setTimeout(() => invoke('start_native_capture').catch(() => {}), 150)
         } else {
           invoke('inject_input', { event: msg })
         }
@@ -186,7 +187,7 @@ export default function Session({ peerId, role, onEnd }: Props) {
     // Auto-quality: adapt JPEG quality based on send vs skip ratio every 3s
     let framesSent = 0
     let framesSkipped = 0
-    let currentQuality = 80
+    let currentQuality = 60
     let stableWindows = 0
 
     const qualityInterval = setInterval(() => {
@@ -215,7 +216,8 @@ export default function Session({ peerId, role, onEnd }: Props) {
     }, 3000)
     agentCleanups.push(() => clearInterval(qualityInterval))
 
-    // Forward Rust JPEG frames as binary over frames DC
+    // Forward Rust JPEG frames over frames DC as raw base64 strings.
+    // Decoding happens on the controller side — agent just passes through the string, zero decode cost.
     const frameUnsub = await listen<string>('screen-frame', (e) => {
       if (framesDc.readyState !== 'open') return
       // Skip frame if buffer is backing up — prevents unbounded latency on slow links
@@ -223,11 +225,8 @@ export default function Session({ peerId, role, onEnd }: Props) {
         framesSkipped++
         return
       }
-      try {
-        const bytes = Uint8Array.from(atob(e.payload), (c) => c.charCodeAt(0))
-        framesDc.send(bytes)
-        framesSent++
-      } catch {}
+      framesDc.send(e.payload)
+      framesSent++
     })
     agentCleanups.push(frameUnsub)
 
@@ -268,7 +267,6 @@ export default function Session({ peerId, role, onEnd }: Props) {
       diag(`DC received: ${dc.label}`)
 
       if (dc.label === 'frames') {
-        dc.binaryType = 'arraybuffer'
         setFramesChannel(dc)
         dc.onopen = () => diag('frames DC open')
         dc.onclose = () => diag('frames DC closed')
