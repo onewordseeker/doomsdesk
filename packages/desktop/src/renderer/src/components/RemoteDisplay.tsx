@@ -219,7 +219,7 @@ export default function RemoteDisplay({ stream, dataChannel, remoteScreenSize, z
             onContextMenu={onContextMenu}
             onWheel={onWheel}
             onPause={() => videoRef.current?.play().catch(() => {})}
-            className="cursor-none select-none"
+            className="cursor-crosshair select-none"
           />
           {frozen && (
             <div className="absolute inset-0 flex items-center justify-center bg-black/60 z-10 pointer-events-none">

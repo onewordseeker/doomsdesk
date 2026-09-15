@@ -21,7 +21,7 @@ screenshots = "0.8"
 base64 = "0.22"
 
 [profile.release]
-opt-level = "s"
+opt-level = 3
 strip = true
 lto = true
 codegen-units = 1

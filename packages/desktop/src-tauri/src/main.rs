@@ -206,12 +206,12 @@ async fn start_native_capture(app: AppHandle, state: State<'_, AppState>) -> Res
 
                 let dyn_img = DynamicImage::ImageRgba8(captured);
 
-                // Cap at 1280px wide for reasonable bandwidth
-                let dyn_img = if w > 1280 {
+                // Cap at 1920px wide — keeps full HD while limiting bandwidth
+                let dyn_img = if w > 1920 {
                     dyn_img.resize(
-                        1280,
-                        (h as f64 * 1280.0 / w as f64) as u32,
-                        FilterType::Nearest,
+                        1920,
+                        (h as f64 * 1920.0 / w as f64) as u32,
+                        FilterType::Triangle,
                     )
                 } else {
                     dyn_img
@@ -219,7 +219,7 @@ async fn start_native_capture(app: AppHandle, state: State<'_, AppState>) -> Res
 
                 let rgb = dyn_img.to_rgb8();
                 let mut jpeg_buf = Vec::new();
-                let mut enc = JpegEncoder::new_with_quality(&mut jpeg_buf, 50);
+                let mut enc = JpegEncoder::new_with_quality(&mut jpeg_buf, 80);
                 enc.encode_image(&rgb).ok()?;
 
                 let b64 = base64::engine::general_purpose::STANDARD.encode(&jpeg_buf);
@@ -231,7 +231,7 @@ async fn start_native_capture(app: AppHandle, state: State<'_, AppState>) -> Res
                 let _ = app.emit("screen-frame-error", "capture_failed");
             }
 
-            std::thread::sleep(std::time::Duration::from_millis(66)); // ~15 fps
+            std::thread::sleep(std::time::Duration::from_millis(33)); // ~30 fps
         }
     });
 

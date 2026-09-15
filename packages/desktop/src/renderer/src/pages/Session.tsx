@@ -132,7 +132,7 @@ export default function Session({ peerId, role, onEnd }: Props) {
           if (sender.track?.kind === 'video') {
             const params = sender.getParameters()
             if (!params.encodings.length) params.encodings = [{}]
-            params.encodings[0].maxBitrate = 4_000_000
+            params.encodings[0].maxBitrate = 8_000_000
             sender.setParameters(params).catch(() => {})
           }
         }
@@ -156,26 +156,43 @@ export default function Session({ peerId, role, onEnd }: Props) {
     canvas.height = window.screen.height
     const ctx = canvas.getContext('2d')!
 
-    // Stream from the canvas into the RTCPeerConnection
-    const stream = (canvas as any).captureStream(15) as MediaStream
+    // Stream from the canvas into the RTCPeerConnection at 30fps
+    const stream = (canvas as any).captureStream(30) as MediaStream
     streamRef.current = stream
-    stream.getTracks().forEach((t) => pc.addTrack(t, stream))
+    // addTransceiver sets encoding params before SDP negotiation — more reliable than setParameters
+    for (const track of stream.getTracks()) {
+      if (track.kind === 'video') {
+        pc.addTransceiver(track, {
+          direction: 'sendonly',
+          streams: [stream],
+          sendEncodings: [{ maxBitrate: 8_000_000, maxFramerate: 30 }],
+        })
+      } else {
+        pc.addTrack(track, stream)
+      }
+    }
     diag('canvas stream added to PC')
 
     setRemoteScreenSize({ width: window.screen.width, height: window.screen.height })
     origScreenRef.current = { width: window.screen.width, height: window.screen.height }
 
-    // Receive JPEG frames from Rust and paint them onto the canvas
-    const unsubFrame = listen<string>('screen-frame', (e) => {
-      const img = new Image()
-      img.onload = () => {
+    // Receive JPEG frames from Rust and paint onto the canvas.
+    // Use img.decode() (async, resolves after GPU upload) and skip stale frames
+    // so a slow decode never blocks a newer frame from painting.
+    let frameSeq = 0
+    const unsubFrame = listen<string>('screen-frame', async (e) => {
+      const mySeq = ++frameSeq
+      try {
+        const img = new Image()
+        img.src = `data:image/jpeg;base64,${e.payload}`
+        await img.decode()
+        if (mySeq < frameSeq) return // newer frame already decoded, skip this one
         if (canvas.width !== img.naturalWidth || canvas.height !== img.naturalHeight) {
           canvas.width = img.naturalWidth
           canvas.height = img.naturalHeight
         }
         ctx.drawImage(img, 0, 0)
-      }
-      img.src = 'data:image/jpeg;base64,' + e.payload
+      } catch {}
     })
     ;(streamRef as any).unsubFrame = unsubFrame
 
