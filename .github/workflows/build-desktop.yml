@@ -74,6 +74,7 @@ jobs:
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          APPLE_SIGNING_IDENTITY: "-"
         with:
           projectPath: packages/desktop
           tauriScript: pnpm tauri
@@ -83,5 +84,11 @@ jobs:
             DoomsDesk desktop app release.
 
             Connects to: https://doomsdesk.hamidentifier.cloud
+
+            **macOS users:** If you see "damaged" error, open Terminal and run:
+            ```
+            xattr -cr ~/Downloads/DoomsDesk_1.0.0_aarch64.dmg
+            ```
+            Then open the .dmg again.
           releaseDraft: false
           prerelease: false
