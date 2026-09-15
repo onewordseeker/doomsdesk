@@ -38,7 +38,7 @@ type DisplayPreset = typeof DISPLAY_PRESETS[number]
 type ConnState = 'connecting' | 'connected' | 'failed' | 'disconnected'
 
 export default function Session({ peerId, role, onEnd }: Props) {
-  const [remoteStream, setRemoteStream] = useState<MediaStream | null>(null)
+  const [framesChannel, setFramesChannel] = useState<RTCDataChannel | null>(null)
   const [dataChannel, setDataChannel] = useState<RTCDataChannel | null>(null)
   const [connState, setConnState] = useState<ConnState>('connecting')
   const [initError, setInitError] = useState('')
@@ -53,8 +53,8 @@ export default function Session({ peerId, role, onEnd }: Props) {
   const [showDiag, setShowDiag] = useState(true)
 
   const pcRef = useRef<RTCPeerConnection | null>(null)
-  const streamRef = useRef<MediaStream | null>(null)
   const dcRef = useRef<RTCDataChannel | null>(null)
+  const agentCleanupRef = useRef<(() => void) | null>(null)
   const origScreenRef = useRef<{ width: number; height: number } | null>(null)
   const durationRef = useRef<ReturnType<typeof setInterval>>()
   const screenCheckRef = useRef<ReturnType<typeof setInterval>>()
@@ -126,17 +126,8 @@ export default function Session({ peerId, role, onEnd }: Props) {
 
     pc.onconnectionstatechange = () => {
       diag(`RTC: ${pc.connectionState}`)
-      if (pc.connectionState === 'connected') {
-        setConnState('connected')
-        for (const sender of pc.getSenders()) {
-          if (sender.track?.kind === 'video') {
-            const params = sender.getParameters()
-            if (!params.encodings.length) params.encodings = [{}]
-            params.encodings[0].maxBitrate = 15_000_000
-            sender.setParameters(params).catch(() => {})
-          }
-        }
-      } else if (pc.connectionState === 'failed') setConnState('failed')
+      if (pc.connectionState === 'connected') setConnState('connected')
+      else if (pc.connectionState === 'failed') setConnState('failed')
       else if (pc.connectionState === 'disconnected') setConnState('disconnected')
     }
 
@@ -148,76 +139,57 @@ export default function Session({ peerId, role, onEnd }: Props) {
   }
 
   async function setupAgentSide(pc: RTCPeerConnection) {
-    diag('starting canvas screen capture')
+    diag('setting up agent data channels')
 
-    const canvas = document.createElement('canvas')
-    canvas.width = window.screen.width
-    canvas.height = window.screen.height
-    const ctx = canvas.getContext('2d', { alpha: false })!
+    // Reliable DC for JPEG frames — backpressure check skips frames if buffer fills up
+    const framesDc = pc.createDataChannel('frames')
+    framesDc.binaryType = 'arraybuffer'
 
-    const stream = (canvas as any).captureStream(30) as MediaStream
-    streamRef.current = stream
+    // Reliable ordered DC for input events and control messages
+    const inputDc = pc.createDataChannel('input')
+    setDataChannel(inputDc)
+    dcRef.current = inputDc
 
-    let transceiver: RTCRtpTransceiver | null = null
-    for (const track of stream.getTracks()) {
-      if (track.kind === 'video') {
-        transceiver = pc.addTransceiver(track, {
-          direction: 'sendonly',
-          streams: [stream],
-          sendEncodings: [{ maxBitrate: 15_000_000, maxFramerate: 30 }],
-        })
-      } else {
-        pc.addTrack(track, stream)
-      }
+    inputDc.onmessage = (ev) => {
+      try {
+        const msg = JSON.parse(ev.data)
+        if (msg.type === 'set_display_resolution') {
+          const { width, height } = msg as { width: number; height: number }
+          diag(`display res → ${width}x${height}`)
+          invoke('inject_input', { event: { type: 'set_display_resolution', width, height } })
+        } else if (msg.type === 'restart_capture') {
+          diag('restart_capture received — restarting')
+          invoke('stop_native_capture').catch(() => {})
+          invoke('start_native_capture').catch(() => {})
+        } else {
+          invoke('inject_input', { event: msg })
+        }
+      } catch {}
     }
 
-    // Prefer H264: hardware-accelerated via VideoToolbox (macOS) and MediaFoundation (Windows)
-    try {
-      const caps = RTCRtpSender.getCapabilities?.('video')
-      if (transceiver?.setCodecPreferences && caps) {
-        const h264 = caps.codecs.filter(c => c.mimeType.toLowerCase() === 'video/h264')
-        const rest = caps.codecs.filter(c => c.mimeType.toLowerCase() !== 'video/h264')
-        if (h264.length) transceiver.setCodecPreferences([...h264, ...rest])
-        diag(`codec pref: H264 x${h264.length} (${h264[0]?.sdpFmtpLine ?? ''})`)
-      }
-    } catch {}
+    inputDc.onopen = () => {
+      diag('input DC open — sending screen_info')
+      inputDc.send(
+        JSON.stringify({ type: 'screen_info', width: window.screen.width, height: window.screen.height })
+      )
+    }
 
-    diag('canvas stream added to PC')
+    framesDc.onopen = () => diag('frames DC open')
+    framesDc.onclose = () => diag('frames DC closed')
+
     setRemoteScreenSize({ width: window.screen.width, height: window.screen.height })
     origScreenRef.current = { width: window.screen.width, height: window.screen.height }
 
-    // RAF paint loop: canvas is updated on the display vsync, decoupled from IPC jitter.
-    // createImageBitmap decodes JPEG off the main thread; the RAF callback draws it instantly.
-    let latestBitmap: ImageBitmap | null = null
-    let frameSeq = 0
-    let rafId = 0
-    const rafPaint = () => {
-      if (latestBitmap) {
-        if (canvas.width !== latestBitmap.width || canvas.height !== latestBitmap.height) {
-          canvas.width = latestBitmap.width
-          canvas.height = latestBitmap.height
-        }
-        ctx.drawImage(latestBitmap, 0, 0)
-        latestBitmap.close()
-        latestBitmap = null
-      }
-      rafId = requestAnimationFrame(rafPaint)
-    }
-    rafId = requestAnimationFrame(rafPaint)
+    const agentCleanups: Array<() => void> = []
 
-    const agentCleanups: Array<() => void> = [() => cancelAnimationFrame(rafId)]
-
-    const frameUnsub = await listen<string>('screen-frame', async (e) => {
-      const mySeq = ++frameSeq
+    // Forward Rust JPEG frames as binary over frames DC
+    const frameUnsub = await listen<string>('screen-frame', (e) => {
+      if (framesDc.readyState !== 'open') return
+      // Skip frame if buffer is backing up — prevents unbounded latency on slow links
+      if (framesDc.bufferedAmount > 524288) return
       try {
-        const binaryStr = atob(e.payload)
-        const bytes = new Uint8Array(binaryStr.length)
-        for (let i = 0; i < binaryStr.length; i++) bytes[i] = binaryStr.charCodeAt(i)
-        const blob = new Blob([bytes], { type: 'image/jpeg' })
-        const bitmap = await createImageBitmap(blob)
-        if (mySeq < frameSeq) { bitmap.close(); return }
-        latestBitmap?.close()
-        latestBitmap = bitmap
+        const bytes = Uint8Array.from(atob(e.payload), (c) => c.charCodeAt(0))
+        framesDc.send(bytes)
       } catch {}
     })
     agentCleanups.push(frameUnsub)
@@ -227,34 +199,10 @@ export default function Session({ peerId, role, onEnd }: Props) {
     })
     agentCleanups.push(errUnsub)
 
-    ;(streamRef as any)._agentCleanup = () => agentCleanups.forEach(f => f())
+    agentCleanupRef.current = () => agentCleanups.forEach((f) => f())
 
     await invoke('start_native_capture')
     diag('native capture started')
-
-    const dc = pc.createDataChannel('input')
-    setDataChannel(dc)
-    dcRef.current = dc
-
-    dc.onmessage = (ev) => {
-      try {
-        const msg = JSON.parse(ev.data)
-        if (msg.type === 'set_display_resolution') {
-          const { width, height } = msg as { width: number; height: number }
-          diag(`display res → ${width}x${height}`)
-          invoke('inject_input', { event: { type: 'set_display_resolution', width, height } })
-        } else {
-          invoke('inject_input', { event: msg })
-        }
-      } catch {}
-    }
-
-    dc.onopen = () => {
-      diag('DC open — sending screen_info')
-      dc.send(
-        JSON.stringify({ type: 'screen_info', width: window.screen.width, height: window.screen.height })
-      )
-    }
 
     let lastW = window.screen.width, lastH = window.screen.height
     screenCheckRef.current = setInterval(() => {
@@ -278,34 +226,29 @@ export default function Session({ peerId, role, onEnd }: Props) {
   }
 
   async function setupControllerSide(pc: RTCPeerConnection) {
-    pc.ontrack = (e) => {
-      diag(`track rx: ${e.track.kind} muted=${e.track.muted} state=${e.track.readyState}`)
-      const stream = e.streams[0]
-      if (stream) {
-        diag(`stream: id=${stream.id.slice(0, 8)} active=${stream.active}`)
-        e.track.onmute = () => diag('track MUTED')
-        e.track.onunmute = () => diag('track UNMUTED')
-        e.track.onended = () => diag('track ENDED')
-        stream.onaddtrack = () => diag('stream addtrack')
-        ;(stream as any).oninactive = () => diag('stream INACTIVE')
-      }
-      setRemoteStream(stream ?? e.streams[0])
-    }
-
     pc.ondatachannel = (e) => {
       const dc = e.channel
-      diag('DC received')
-      setDataChannel(dc)
-      dc.onopen = () => diag('DC open')
-      dc.onclose = () => diag('DC closed')
-      dc.onmessage = (ev) => {
-        try {
-          const msg = JSON.parse(ev.data)
-          if (msg.type === 'screen_info') {
-            diag(`screen_info: ${msg.width}x${msg.height}`)
-            setRemoteScreenSize({ width: msg.width, height: msg.height })
-          }
-        } catch {}
+      diag(`DC received: ${dc.label}`)
+
+      if (dc.label === 'frames') {
+        dc.binaryType = 'arraybuffer'
+        setFramesChannel(dc)
+        dc.onopen = () => diag('frames DC open')
+        dc.onclose = () => diag('frames DC closed')
+      } else if (dc.label === 'input') {
+        setDataChannel(dc)
+        dcRef.current = dc
+        dc.onopen = () => diag('input DC open')
+        dc.onclose = () => diag('input DC closed')
+        dc.onmessage = (ev) => {
+          try {
+            const msg = JSON.parse(ev.data)
+            if (msg.type === 'screen_info') {
+              diag(`screen_info: ${msg.width}x${msg.height}`)
+              setRemoteScreenSize({ width: msg.width, height: msg.height })
+            }
+          } catch {}
+        }
       }
     }
   }
@@ -352,13 +295,13 @@ export default function Session({ peerId, role, onEnd }: Props) {
     clearInterval(screenCheckRef.current)
     if (role === 'agent') {
       invoke('stop_native_capture').catch(() => {})
-      ;(streamRef.current as any)?._agentCleanup?.()
+      agentCleanupRef.current?.()
+      agentCleanupRef.current = null
     }
-    streamRef.current?.getTracks().forEach((t) => t.stop())
-    streamRef.current = null
     pcRef.current?.close()
     pcRef.current = null
-    setRemoteStream(null)
+    setFramesChannel(null)
+    setDataChannel(null)
   }
 
   function formatDuration(s: number) {
@@ -372,7 +315,7 @@ export default function Session({ peerId, role, onEnd }: Props) {
 
   function handleEnd() {
     invoke('send_signaling', { msg: { type: 'disconnect', targetId: peerId } })
-    invoke('close_session') // Rust closes the agent window if it exists
+    invoke('close_session')
     cleanup()
     onEnd()
   }
@@ -462,7 +405,6 @@ export default function Session({ peerId, role, onEnd }: Props) {
 
           <div className="w-px h-4 bg-surface-border mx-1" />
 
-          {/* Remote resolution readout + display resolution picker */}
           <span
             className="text-xs text-slate-600 font-mono"
             title="Current remote display resolution"
@@ -577,7 +519,7 @@ export default function Session({ peerId, role, onEnd }: Props) {
       )}
 
       <RemoteDisplay
-        stream={remoteStream}
+        framesChannel={framesChannel}
         dataChannel={dataChannel}
         remoteScreenSize={remoteScreenSize}
         zoom={zoom}

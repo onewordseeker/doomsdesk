@@ -1,7 +1,7 @@
 import React, { useRef, useEffect, useCallback, useState } from 'react'
 
 interface Props {
-  stream: MediaStream | null
+  framesChannel: RTCDataChannel | null
   dataChannel: RTCDataChannel | null
   remoteScreenSize: { width: number; height: number }
   zoom: number
@@ -9,50 +9,63 @@ interface Props {
   connState: 'connecting' | 'connected' | 'failed' | 'disconnected'
 }
 
-export default function RemoteDisplay({ stream, dataChannel, remoteScreenSize, zoom, stretch, connState }: Props) {
-  const videoRef = useRef<HTMLVideoElement>(null)
+export default function RemoteDisplay({ framesChannel, dataChannel, remoteScreenSize, zoom, stretch, connState }: Props) {
+  const canvasRef = useRef<HTMLCanvasElement>(null)
   const containerRef = useRef<HTMLDivElement>(null)
   const dcRef = useRef(dataChannel)
   const lastMoveSentRef = useRef(0)
   const heldModsRef = useRef({ ctrl: false, shift: false, alt: false, meta: false })
   const [frozen, setFrozen] = useState(false)
+  const [hasFrames, setHasFrames] = useState(false)
 
   useEffect(() => { dcRef.current = dataChannel }, [dataChannel])
 
+  // Decode and render incoming JPEG frames from the data channel
   useEffect(() => {
-    if (videoRef.current && stream) {
-      videoRef.current.srcObject = stream
-      videoRef.current.play().catch(() => {})
+    const canvas = canvasRef.current
+    if (!canvas || !framesChannel) return
+    const ctx = canvas.getContext('2d', { alpha: false })
+    if (!ctx) return
+
+    let latestBitmap: ImageBitmap | null = null
+    let rafId = 0
+    let lastFrameAt = 0 // 0 = no frame received yet
+    let hasReceivedFrame = false
+
+    const rafPaint = () => {
+      if (latestBitmap) {
+        if (canvas.width !== latestBitmap.width || canvas.height !== latestBitmap.height) {
+          canvas.width = latestBitmap.width
+          canvas.height = latestBitmap.height
+        }
+        ctx.drawImage(latestBitmap, 0, 0)
+        latestBitmap.close()
+        latestBitmap = null
+      }
+      rafId = requestAnimationFrame(rafPaint)
     }
-  }, [stream])
+    rafId = requestAnimationFrame(rafPaint)
 
-  // Stall watchdog — use requestVideoFrameCallback (fires on every decoded frame) as the
-  // primary signal, with a 4-second timeout. Falls back to an interval-only check if RVC
-  // isn't available. Sends restart_capture after one missed 4-second window.
-  useEffect(() => {
-    const v = videoRef.current
-    if (!v || !stream) return
-
-    let lastFrameAt = performance.now()
-    let rvcId = -1
-
-    const onFrame = () => {
+    const onMessage = async (e: MessageEvent) => {
+      if (!(e.data instanceof ArrayBuffer)) return
+      hasReceivedFrame = true
       lastFrameAt = performance.now()
+      setHasFrames(true)
       setFrozen(false)
-      if (v.srcObject) rvcId = (v as any).requestVideoFrameCallback(onFrame)
+      try {
+        const blob = new Blob([e.data], { type: 'image/jpeg' })
+        const bitmap = await createImageBitmap(blob)
+        latestBitmap?.close()
+        latestBitmap = bitmap
+      } catch {}
     }
 
-    if (typeof (v as any).requestVideoFrameCallback === 'function') {
-      rvcId = (v as any).requestVideoFrameCallback(onFrame)
-    } else {
-      // Fallback: treat every interval tick as a "frame received" — relies purely on interval check
-      lastFrameAt = performance.now()
-    }
+    framesChannel.addEventListener('message', onMessage)
 
+    // Stall watchdog: if frames stop arriving for 4s, show overlay and request restart
     const stallId = setInterval(() => {
-      if (!v.srcObject || v.paused) return
-      const age = performance.now() - lastFrameAt
-      if (age > 4000) {
+      if (!hasReceivedFrame) return
+      if (performance.now() - lastFrameAt > 4000) {
         setFrozen(true)
         lastFrameAt = performance.now()
         const dc = dcRef.current
@@ -61,15 +74,20 @@ export default function RemoteDisplay({ stream, dataChannel, remoteScreenSize, z
     }, 2000)
 
     return () => {
+      cancelAnimationFrame(rafId)
       clearInterval(stallId)
-      if (rvcId >= 0 && typeof (v as any).cancelVideoFrameCallback === 'function') {
-        ;(v as any).cancelVideoFrameCallback(rvcId)
-      }
+      framesChannel.removeEventListener('message', onMessage)
+      latestBitmap?.close()
     }
-  }, [stream])
+  }, [framesChannel])
+
+  // Reset hasFrames when channel changes
+  useEffect(() => {
+    if (!framesChannel) setHasFrames(false)
+  }, [framesChannel])
 
   function toRemote(e: React.MouseEvent): { x: number; y: number } {
-    const el = videoRef.current
+    const el = canvasRef.current
     if (!el || !remoteScreenSize.width) return { x: 0, y: 0 }
     const { width: sw, height: sh } = remoteScreenSize
 
@@ -81,14 +99,14 @@ export default function RemoteDisplay({ stream, dataChannel, remoteScreenSize, z
     }
 
     const rect = el.getBoundingClientRect()
-    const streamAspect = el.videoWidth && el.videoHeight ? el.videoWidth / el.videoHeight : sw / sh
+    const contentAspect = el.width && el.height ? el.width / el.height : sw / sh
     const elAspect = rect.width / rect.height
     let contentLeft: number, contentTop: number, contentWidth: number, contentHeight: number
-    if (streamAspect > elAspect) {
-      contentWidth = rect.width; contentHeight = rect.width / streamAspect
+    if (contentAspect > elAspect) {
+      contentWidth = rect.width; contentHeight = rect.width / contentAspect
       contentLeft = rect.left; contentTop = rect.top + (rect.height - contentHeight) / 2
     } else {
-      contentHeight = rect.height; contentWidth = rect.height * streamAspect
+      contentHeight = rect.height; contentWidth = rect.height * contentAspect
       contentLeft = rect.left + (rect.width - contentWidth) / 2; contentTop = rect.top
     }
     return {
@@ -112,7 +130,6 @@ export default function RemoteDisplay({ stream, dataChannel, remoteScreenSize, z
     heldModsRef.current = { ctrl: false, shift: false, alt: false, meta: false }
   }
 
-  // Release everything when the app loses focus (Ctrl/Alt/Shift can't get stuck)
   useEffect(() => {
     const flush = () => {
       releaseModifiers()
@@ -125,11 +142,11 @@ export default function RemoteDisplay({ stream, dataChannel, remoteScreenSize, z
       window.removeEventListener('blur', flush)
       document.removeEventListener('visibilitychange', onVis)
     }
-  }, []) // intentionally no deps — uses dcRef which is always current
+  }, [])
 
   const onMouseMove = useCallback((e: React.MouseEvent) => {
     const now = Date.now()
-    if (now - lastMoveSentRef.current < 33) return
+    if (now - lastMoveSentRef.current < 16) return // ~60hz mouse move
     lastMoveSentRef.current = now
     const { x, y } = toRemote(e)
     sendInput({ type: 'mousemove', x, y })
@@ -188,10 +205,11 @@ export default function RemoteDisplay({ stream, dataChannel, remoteScreenSize, z
     }
   }, [dataChannel, remoteScreenSize, stretch])
 
-  const videoStyle: React.CSSProperties = {
+  const canvasStyle: React.CSSProperties = {
     width: '100%',
     height: '100%',
     objectFit: stretch ? 'fill' : 'contain',
+    display: hasFrames ? 'block' : 'none',
     ...(zoom !== 1 && !stretch ? { transform: `scale(${zoom})`, transformOrigin: 'center center' } : {}),
   }
 
@@ -203,39 +221,33 @@ export default function RemoteDisplay({ stream, dataChannel, remoteScreenSize, z
       onKeyDown={onKeyDown}
       onKeyUp={onKeyUp}
     >
-      {stream ? (
-        <>
-          <video
-            ref={videoRef}
-            style={videoStyle}
-            muted
-            autoPlay
-            playsInline
-            disablePictureInPicture
-            onMouseMove={onMouseMove}
-            onMouseDown={onMouseDown}
-            onMouseUp={onMouseUp}
-            onMouseLeave={onMouseLeave}
-            onContextMenu={onContextMenu}
-            onWheel={onWheel}
-            onPause={() => videoRef.current?.play().catch(() => {})}
-            className="cursor-crosshair select-none"
-          />
-          {frozen && (
-            <div className="absolute inset-0 flex items-center justify-center bg-black/60 z-10 pointer-events-none">
-              <div className="flex flex-col items-center gap-2 text-center px-6">
-                <div className="w-8 h-8 border-2 border-slate-600 border-t-yellow-400 rounded-full animate-spin" />
-                <span className="text-yellow-400 text-sm font-semibold">Screen temporarily blocked</span>
-                <span className="text-slate-400 text-xs leading-snug">
-                  An elevated window (Task Manager, UAC prompt) is blocking capture.<br />
-                  Close it on the remote to resume.
-                </span>
-              </div>
-            </div>
-          )}
-        </>
-      ) : connState === 'failed' ? null : (
-        <div className="flex flex-col items-center gap-3 text-slate-500">
+      <canvas
+        ref={canvasRef}
+        style={canvasStyle}
+        onMouseMove={onMouseMove}
+        onMouseDown={onMouseDown}
+        onMouseUp={onMouseUp}
+        onMouseLeave={onMouseLeave}
+        onContextMenu={onContextMenu}
+        onWheel={onWheel}
+        className="cursor-crosshair select-none"
+      />
+
+      {frozen && (
+        <div className="absolute inset-0 flex items-center justify-center bg-black/60 z-10 pointer-events-none">
+          <div className="flex flex-col items-center gap-2 text-center px-6">
+            <div className="w-8 h-8 border-2 border-slate-600 border-t-yellow-400 rounded-full animate-spin" />
+            <span className="text-yellow-400 text-sm font-semibold">Screen temporarily blocked</span>
+            <span className="text-slate-400 text-xs leading-snug">
+              An elevated window (Task Manager, UAC prompt) is blocking capture.<br />
+              Close it on the remote to resume.
+            </span>
+          </div>
+        </div>
+      )}
+
+      {!hasFrames && connState !== 'failed' && connState !== 'disconnected' && (
+        <div className="absolute inset-0 flex flex-col items-center justify-center gap-3 text-slate-500">
           <div className="w-12 h-12 border-2 border-slate-600 border-t-brand rounded-full animate-spin" />
           <span className="text-sm">Connecting…</span>
           <span className="text-xs text-slate-600">Waiting for screen stream from remote device</span>
