@@ -141,14 +141,35 @@ export default function Session({ peerId, role, onEnd }: Props) {
   async function setupAgentSide(pc: RTCPeerConnection) {
     diag('setting up agent data channels')
 
-    // Reliable DC for JPEG frames — backpressure check skips frames if buffer fills up
     const framesDc = pc.createDataChannel('frames')
-    framesDc.binaryType = 'arraybuffer'
-
-    // Reliable ordered DC for input events and control messages
     const inputDc = pc.createDataChannel('input')
     setDataChannel(inputDc)
     dcRef.current = inputDc
+
+    const agentCleanups: Array<() => void> = []
+
+    // Quality + capture state — declared early so all handlers can reference them
+    let framesSent = 0
+    let framesSkipped = 0
+    let currentQuality = 60
+    let stableWindows = 0
+    let consecutiveErrors = 0
+    let captureRestarting = false
+
+    function doRestartCapture(reason: string) {
+      if (captureRestarting) return
+      captureRestarting = true
+      diag(`${reason} — resetting quality, restarting capture`)
+      currentQuality = 60
+      consecutiveErrors = 0
+      invoke('set_capture_quality', { quality: 60 }).catch(() => {})
+      invoke('stop_native_capture').catch(() => {})
+      // 500ms lets Windows display settle after a resolution change before we try to capture
+      setTimeout(() => {
+        invoke('start_native_capture').catch(() => {})
+        captureRestarting = false
+      }, 500)
+    }
 
     inputDc.onmessage = (ev) => {
       try {
@@ -158,10 +179,7 @@ export default function Session({ peerId, role, onEnd }: Props) {
           diag(`display res → ${width}x${height}`)
           invoke('inject_input', { event: { type: 'set_display_resolution', width, height } })
         } else if (msg.type === 'restart_capture') {
-          diag('restart_capture received — restarting capture')
-          invoke('stop_native_capture').catch(() => {})
-          // 150ms gap ensures old capture loop exits (checks every 33ms) before new one starts
-          setTimeout(() => invoke('start_native_capture').catch(() => {}), 150)
+          doRestartCapture('restart_capture from controller')
         } else {
           invoke('inject_input', { event: msg })
         }
@@ -182,21 +200,16 @@ export default function Session({ peerId, role, onEnd }: Props) {
     setRemoteScreenSize({ width: window.screen.width, height: window.screen.height })
     origScreenRef.current = { width: window.screen.width, height: window.screen.height }
 
-    const agentCleanups: Array<() => void> = []
-
-    // Auto-quality: adapt JPEG quality based on send vs skip ratio every 3s
-    let framesSent = 0
-    let framesSkipped = 0
-    let currentQuality = 60
-    let stableWindows = 0
-
+    // Auto-quality: adapt JPEG quality based on send/skip/error ratio every 3s
     const qualityInterval = setInterval(() => {
       const total = framesSent + framesSkipped
       if (total === 0) return
       const skipRate = framesSkipped / total
-      diag(`frames sent=${framesSent} skipped=${framesSkipped} skip%=${Math.round(skipRate*100)} q=${currentQuality}`)
-      if (skipRate > 0.2 && currentQuality > 40) {
-        currentQuality = Math.max(40, currentQuality - 10)
+      diag(`sent=${framesSent} skip=${framesSkipped} skip%=${Math.round(skipRate * 100)} q=${currentQuality}`)
+      if (skipRate > 0 && currentQuality > 40) {
+        // Drop faster on high skip rates
+        const drop = skipRate > 0.8 ? 25 : skipRate > 0.5 ? 15 : 10
+        currentQuality = Math.max(40, currentQuality - drop)
         invoke('set_capture_quality', { quality: currentQuality }).catch(() => {})
         stableWindows = 0
         diag(`quality ↓ ${currentQuality}`)
@@ -216,22 +229,25 @@ export default function Session({ peerId, role, onEnd }: Props) {
     }, 3000)
     agentCleanups.push(() => clearInterval(qualityInterval))
 
-    // Forward Rust JPEG frames over frames DC as raw base64 strings.
-    // Decoding happens on the controller side — agent just passes through the string, zero decode cost.
+    // Forward Rust JPEG frames as raw base64 strings — zero decode cost on agent side
     const frameUnsub = await listen<string>('screen-frame', (e) => {
+      consecutiveErrors = 0 // successful frame resets the error streak
       if (framesDc.readyState !== 'open') return
-      // Skip frame if buffer is backing up — prevents unbounded latency on slow links
-      if (framesDc.bufferedAmount > 524288) {
-        framesSkipped++
-        return
-      }
-      framesDc.send(e.payload)
-      framesSent++
+      if (framesDc.bufferedAmount > 524288) { framesSkipped++; return }
+      try {
+        framesDc.send(e.payload)
+        framesSent++
+      } catch { framesSkipped++ }
     })
     agentCleanups.push(frameUnsub)
 
+    // Count Rust capture errors as skipped frames so quality adaptation still works
+    // when the OS screen is unavailable (e.g. right after a resolution change on Windows).
+    // After 30 consecutive errors (~1s) restart capture automatically.
     const errUnsub = await listen<string>('screen-frame-error', () => {
-      diag('native capture failed — check Screen Recording permission in System Settings')
+      framesSkipped++
+      consecutiveErrors++
+      if (consecutiveErrors >= 30) doRestartCapture('capture failing (30 consecutive errors)')
     })
     agentCleanups.push(errUnsub)
 
@@ -245,7 +261,9 @@ export default function Session({ peerId, role, onEnd }: Props) {
       const w = window.screen.width, h = window.screen.height
       if (w !== lastW || h !== lastH) {
         lastW = w; lastH = h
-        diag(`display changed: ${w}x${h}`)
+        // Resolution changed: restart capture so the new dimensions are picked up,
+        // and reset quality since frame size has changed significantly
+        doRestartCapture(`display changed: ${w}x${h}`)
         const d = dcRef.current
         if (d?.readyState === 'open') {
           d.send(JSON.stringify({ type: 'screen_info', width: w, height: h }))

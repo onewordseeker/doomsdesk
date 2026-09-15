@@ -1,8 +1,42 @@
 import React, { useState, useEffect, useRef } from 'react'
 import { invoke } from '@tauri-apps/api/core'
 import { listen } from '@tauri-apps/api/event'
-import { Copy, Eye, EyeOff, RefreshCw, Settings, Globe, Wifi, WifiOff } from 'lucide-react'
+import { Copy, Eye, EyeOff, RefreshCw, Settings, Globe, Wifi, WifiOff, Clock, X, Lock } from 'lucide-react'
 import appIcon from '../assets/icon.png'
+
+interface RecentDevice {
+  id: string
+  savedPassword?: string
+  lastConnected: number
+}
+
+const RECENTS_KEY = 'doomsdesk_recent_devices'
+
+function loadRecents(): RecentDevice[] {
+  try { return JSON.parse(localStorage.getItem(RECENTS_KEY) ?? '[]') } catch { return [] }
+}
+
+function saveRecents(list: RecentDevice[]) {
+  localStorage.setItem(RECENTS_KEY, JSON.stringify(list.slice(0, 10)))
+}
+
+function upsertRecent(id: string, password: string | undefined) {
+  const list = loadRecents().filter((d) => d.id !== id)
+  list.unshift({ id, savedPassword: password, lastConnected: Date.now() })
+  saveRecents(list)
+}
+
+function formatTimeAgo(ts: number): string {
+  const s = Math.floor((Date.now() - ts) / 1000)
+  if (s < 60) return 'just now'
+  if (s < 3600) return `${Math.floor(s / 60)}m ago`
+  if (s < 86400) return `${Math.floor(s / 3600)}h ago`
+  return `${Math.floor(s / 86400)}d ago`
+}
+
+function formatId(id: string) {
+  return id.replace(/-/g, ' ').replace(/(\d{3}) (\d{3}) (\d{3})/, '$1 $2 $3')
+}
 
 export default function Home() {
   const [deviceId, setDeviceId] = useState('---')
@@ -12,25 +46,46 @@ export default function Home() {
   const [serverOnline, setServerOnline] = useState(false)
   const [connectId, setConnectId] = useState('')
   const [connectPw, setConnectPw] = useState('')
+  const [rememberPw, setRememberPw] = useState(false)
   const [connecting, setConnecting] = useState(false)
   const [connectError, setConnectError] = useState('')
   const [copyFeedback, setCopyFeedback] = useState<'id' | 'pw' | null>(null)
   const [activeTab, setActiveTab] = useState<'control' | 'receive'>('control')
   const [showSettings, setShowSettings] = useState(false)
   const [incomingConn, setIncomingConn] = useState<{ sourceId: string } | null>(null)
+  const [recentDevices, setRecentDevices] = useState<RecentDevice[]>(loadRecents)
   const pollRef = useRef<ReturnType<typeof setInterval>>()
+
+  // Refs so the stale signaling-message closure can read current form values
+  const connectIdRef = useRef(connectId)
+  const connectPwRef = useRef(connectPw)
+  const rememberPwRef = useRef(rememberPw)
+  useEffect(() => { connectIdRef.current = connectId }, [connectId])
+  useEffect(() => { connectPwRef.current = connectPw }, [connectPw])
+  useEffect(() => { rememberPwRef.current = rememberPw }, [rememberPw])
 
   useEffect(() => {
     load()
     pollRef.current = setInterval(load, 3000)
 
-    const unsubSignal = listen<{ type: string; reason?: string; approved?: boolean; sourceId?: string }>(
+    const unsubSignal = listen<{ type: string; reason?: string; approved?: boolean; sourceId?: string; peerId?: string }>(
       'signaling-message',
       (e) => {
         const msg = e.payload
-        if (msg.type === 'connect_result' && !msg.approved) {
-          setConnecting(false)
-          setConnectError(msg.reason ?? 'Connection refused')
+        if (msg.type === 'connect_result') {
+          if (!msg.approved) {
+            setConnecting(false)
+            setConnectError(msg.reason ?? 'Connection refused')
+          } else {
+            // Connection approved — save to recent devices
+            const digits = connectIdRef.current.replace(/\D/g, '')
+            const cleanId = digits.length === 9
+              ? `${digits.slice(0, 3)}-${digits.slice(3, 6)}-${digits.slice(6, 9)}`
+              : digits
+            const pw = rememberPwRef.current ? connectPwRef.current : undefined
+            upsertRecent(cleanId, pw)
+            setRecentDevices(loadRecents())
+          }
         }
         if (msg.type === 'incoming' && msg.sourceId) {
           setIncomingConn({ sourceId: msg.sourceId })
@@ -57,28 +112,34 @@ export default function Home() {
     setPermPw(config.permanentPassword ?? '')
   }
 
-  function formatId(id: string) {
-    return id.replace(/-/g, ' ').replace(/(\d{3}) (\d{3}) (\d{3})/, '$1 $2 $3')
-  }
-
   function copy(text: string, type: 'id' | 'pw') {
     navigator.clipboard.writeText(text)
     setCopyFeedback(type)
     setTimeout(() => setCopyFeedback(null), 1500)
   }
 
-  async function handleConnect() {
-    if (!connectId.trim()) return
+  async function handleConnect(id = connectId, pw = connectPw) {
+    if (!id.trim()) return
+    setConnectId(id)
+    setConnectPw(pw)
     setConnecting(true)
     setConnectError('')
-    // Normalize: strip non-digits, reformat as XXX-XXX-XXX to match server key
-    const digits = connectId.replace(/\D/g, '')
-    const cleanId =
-      digits.length === 9
-        ? `${digits.slice(0, 3)}-${digits.slice(3, 6)}-${digits.slice(6, 9)}`
-        : digits
-    await invoke('connect_to_peer', { targetId: cleanId, password: connectPw })
+    const digits = id.replace(/\D/g, '')
+    const cleanId = digits.length === 9
+      ? `${digits.slice(0, 3)}-${digits.slice(3, 6)}-${digits.slice(6, 9)}`
+      : digits
+    await invoke('connect_to_peer', { targetId: cleanId, password: pw })
     setTimeout(() => setConnecting(false), 8000)
+  }
+
+  function connectRecent(device: RecentDevice) {
+    handleConnect(device.id, device.savedPassword ?? '')
+  }
+
+  function removeRecent(id: string) {
+    const updated = loadRecents().filter((d) => d.id !== id)
+    saveRecents(updated)
+    setRecentDevices(updated)
   }
 
   async function savePermPw() {
@@ -90,7 +151,6 @@ export default function Home() {
     await invoke('respond_to_connection', { sourceId: incomingConn.sourceId, approved })
     setIncomingConn(null)
     if (approved) {
-      // Start input worker so incoming controller can inject input
       await invoke('start_input_worker')
     }
   }
@@ -181,7 +241,6 @@ export default function Home() {
             <p className="text-xs text-slate-600 mt-1.5">Allow connections without approval</p>
           </div>
 
-          {/* Open web console */}
           <button
             onClick={() => invoke('open_external', { url: 'https://doomsdesk.hamidentifier.cloud' })}
             className="mt-auto flex items-center gap-2 text-xs text-slate-500 hover:text-brand transition-colors"
@@ -192,7 +251,7 @@ export default function Home() {
         </div>
 
         {/* Right panel — Connect */}
-        <div className="flex-1 flex flex-col">
+        <div className="flex-1 flex flex-col overflow-hidden">
           {/* Tabs */}
           <div className="flex border-b border-surface-border px-5 pt-4 gap-0 shrink-0">
             {(['control', 'receive'] as const).map((tab) => (
@@ -210,74 +269,144 @@ export default function Home() {
             ))}
           </div>
 
-          <div className="flex-1 flex items-center justify-center p-8">
+          <div className="flex-1 overflow-y-auto">
             {activeTab === 'control' ? (
-              <div className="w-full max-w-sm">
-                <h2 className="text-lg font-semibold text-white mb-1">Connect to Remote Device</h2>
-                <p className="text-sm text-slate-500 mb-6">Enter the ID of the device you want to control</p>
+              <div className="p-8">
+                {/* Connect form */}
+                <div className="max-w-sm mx-auto">
+                  <h2 className="text-lg font-semibold text-white mb-1">Connect to Remote Device</h2>
+                  <p className="text-sm text-slate-500 mb-5">Enter the ID of the device you want to control</p>
 
-                <div className="space-y-3">
-                  <input
-                    type="text"
-                    value={connectId}
-                    onChange={(e) => setConnectId(e.target.value)}
-                    onKeyDown={(e) => e.key === 'Enter' && handleConnect()}
-                    placeholder="Device ID  (e.g. 123 456 789)"
-                    className="w-full bg-surface border border-surface-border rounded-xl px-4 py-3 text-white font-mono text-lg tracking-wider placeholder:text-slate-600 focus:outline-none focus:border-brand transition-colors"
-                  />
-                  <input
-                    type="password"
-                    value={connectPw}
-                    onChange={(e) => setConnectPw(e.target.value)}
-                    onKeyDown={(e) => e.key === 'Enter' && handleConnect()}
-                    placeholder="Password (optional)"
-                    className="w-full bg-surface border border-surface-border rounded-xl px-4 py-3 text-white placeholder:text-slate-600 focus:outline-none focus:border-brand transition-colors"
-                  />
-                  <button
-                    onClick={handleConnect}
-                    disabled={connecting || !connectId.trim() || !serverOnline}
-                    className="w-full bg-brand hover:bg-brand-hover disabled:opacity-40 disabled:cursor-not-allowed text-white font-semibold rounded-xl py-3 transition-colors flex items-center justify-center gap-2"
-                  >
-                    {connecting ? (
-                      <>
-                        <RefreshCw size={16} className="animate-spin" />
-                        Connecting…
-                      </>
-                    ) : (
-                      'Connect'
+                  <div className="space-y-3">
+                    <input
+                      type="text"
+                      value={connectId}
+                      onChange={(e) => setConnectId(e.target.value)}
+                      onKeyDown={(e) => e.key === 'Enter' && handleConnect()}
+                      placeholder="Device ID  (e.g. 123 456 789)"
+                      className="w-full bg-surface border border-surface-border rounded-xl px-4 py-3 text-white font-mono text-lg tracking-wider placeholder:text-slate-600 focus:outline-none focus:border-brand transition-colors"
+                    />
+                    <input
+                      type="password"
+                      value={connectPw}
+                      onChange={(e) => setConnectPw(e.target.value)}
+                      onKeyDown={(e) => e.key === 'Enter' && handleConnect()}
+                      placeholder="Password (optional)"
+                      className="w-full bg-surface border border-surface-border rounded-xl px-4 py-3 text-white placeholder:text-slate-600 focus:outline-none focus:border-brand transition-colors"
+                    />
+
+                    {/* Remember password */}
+                    <label className="flex items-center gap-2 cursor-pointer group w-fit">
+                      <div
+                        onClick={() => setRememberPw((v) => !v)}
+                        className={`w-4 h-4 rounded border flex items-center justify-center transition-colors ${
+                          rememberPw
+                            ? 'bg-brand border-brand'
+                            : 'border-surface-border bg-surface group-hover:border-slate-500'
+                        }`}
+                      >
+                        {rememberPw && (
+                          <svg className="w-2.5 h-2.5 text-white" fill="none" viewBox="0 0 10 10">
+                            <path d="M1.5 5l2.5 2.5 4.5-4.5" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+                          </svg>
+                        )}
+                      </div>
+                      <span className="text-xs text-slate-400 group-hover:text-slate-300 transition-colors select-none">
+                        Remember password for this device
+                      </span>
+                    </label>
+
+                    <button
+                      onClick={() => handleConnect()}
+                      disabled={connecting || !connectId.trim() || !serverOnline}
+                      className="w-full bg-brand hover:bg-brand-hover disabled:opacity-40 disabled:cursor-not-allowed text-white font-semibold rounded-xl py-3 transition-colors flex items-center justify-center gap-2"
+                    >
+                      {connecting ? (
+                        <>
+                          <RefreshCw size={16} className="animate-spin" />
+                          Connecting…
+                        </>
+                      ) : (
+                        'Connect'
+                      )}
+                    </button>
+
+                    {connectError && (
+                      <p className="text-xs text-center text-red-400">{connectError}</p>
                     )}
-                  </button>
-                  {connectError && (
-                    <p className="text-xs text-center text-red-400">{connectError}</p>
-                  )}
-                  {!serverOnline && (
-                    <p className="text-xs text-center text-amber-500">
-                      Not connected to server — make sure the server is running
-                    </p>
-                  )}
+                    {!serverOnline && (
+                      <p className="text-xs text-center text-amber-500">
+                        Not connected to server — make sure the server is running
+                      </p>
+                    )}
+                  </div>
                 </div>
+
+                {/* Recent devices */}
+                {recentDevices.length > 0 && (
+                  <div className="max-w-sm mx-auto mt-8">
+                    <div className="flex items-center gap-2 mb-3">
+                      <Clock size={12} className="text-slate-500" />
+                      <span className="text-xs text-slate-500 uppercase tracking-widest font-medium">Recent</span>
+                    </div>
+                    <div className="space-y-2">
+                      {recentDevices.map((device) => (
+                        <div
+                          key={device.id}
+                          className="flex items-center gap-3 bg-surface border border-surface-border rounded-xl px-4 py-3 group hover:border-slate-600 transition-colors"
+                        >
+                          <div className="flex-1 min-w-0">
+                            <div className="flex items-center gap-2">
+                              <span className="font-mono text-sm text-white tracking-wider">
+                                {formatId(device.id)}
+                              </span>
+                              {device.savedPassword && (
+                                <Lock size={10} className="text-brand shrink-0" title="Password saved" />
+                              )}
+                            </div>
+                            <span className="text-xs text-slate-600">{formatTimeAgo(device.lastConnected)}</span>
+                          </div>
+                          <button
+                            onClick={() => connectRecent(device)}
+                            disabled={connecting || !serverOnline}
+                            className="text-xs text-brand hover:text-brand-hover disabled:opacity-40 font-medium transition-colors shrink-0"
+                          >
+                            Connect
+                          </button>
+                          <button
+                            onClick={() => removeRecent(device.id)}
+                            className="text-slate-700 hover:text-slate-400 transition-colors opacity-0 group-hover:opacity-100 shrink-0"
+                            title="Remove"
+                          >
+                            <X size={12} />
+                          </button>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
               </div>
             ) : (
-              <div className="text-center">
-                <div className="w-20 h-20 rounded-2xl bg-surface border border-surface-border flex items-center justify-center mx-auto mb-6">
-                  <img src={appIcon} className="w-12 h-12 rounded-full" alt="DoomsDesk" />
+              <div className="flex items-center justify-center h-full p-8">
+                <div className="text-center">
+                  <div className="w-20 h-20 rounded-2xl bg-surface border border-surface-border flex items-center justify-center mx-auto mb-6">
+                    <img src={appIcon} className="w-12 h-12 rounded-full" alt="DoomsDesk" />
+                  </div>
+                  <h2 className="text-lg font-semibold text-white mb-2">Ready to Receive</h2>
+                  <p className="text-sm text-slate-500 max-w-xs mx-auto">
+                    Share your{' '}
+                    <span className="text-white font-mono">{formatId(deviceId)}</span> and password
+                    with the person helping you. They can then connect to your device.
+                  </p>
                 </div>
-                <h2 className="text-lg font-semibold text-white mb-2">Ready to Receive</h2>
-                <p className="text-sm text-slate-500 max-w-xs mx-auto">
-                  Share your{' '}
-                  <span className="text-white font-mono">{formatId(deviceId)}</span> and password
-                  with the person helping you. They can then connect to your device.
-                </p>
               </div>
             )}
           </div>
         </div>
       </div>
 
-      {/* Settings overlay */}
       {showSettings && <SettingsOverlay onClose={() => setShowSettings(false)} />}
 
-      {/* Incoming connection modal */}
       {incomingConn && (
         <IncomingConnectionModal
           sourceId={incomingConn.sourceId}
