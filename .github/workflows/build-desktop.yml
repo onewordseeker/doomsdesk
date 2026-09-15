@@ -9,16 +9,13 @@ on:
 jobs:
   build-windows:
     runs-on: windows-latest
-    defaults:
-      run:
-        working-directory: packages/desktop
     steps:
       - uses: actions/checkout@v4
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 22
 
       - name: Install pnpm
         uses: pnpm/action-setup@v3
@@ -32,7 +29,6 @@ jobs:
 
       - name: Install frontend dependencies
         run: pnpm install
-        working-directory: .
 
       - name: Build Tauri (Windows)
         uses: tauri-apps/tauri-action@v0
@@ -40,6 +36,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           projectPath: packages/desktop
+          tauriScript: pnpm tauri
           tagName: ${{ github.ref_name }}
           releaseName: DoomsDesk ${{ github.ref_name }}
           releaseBody: |
@@ -51,16 +48,13 @@ jobs:
 
   build-macos:
     runs-on: macos-latest
-    defaults:
-      run:
-        working-directory: packages/desktop
     steps:
       - uses: actions/checkout@v4
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 22
 
       - name: Install pnpm
         uses: pnpm/action-setup@v3
@@ -72,7 +66,6 @@ jobs:
 
       - name: Install frontend dependencies
         run: pnpm install
-        working-directory: .
 
       - name: Build Tauri (macOS)
         uses: tauri-apps/tauri-action@v0
@@ -80,6 +73,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           projectPath: packages/desktop
+          tauriScript: pnpm tauri
           tagName: ${{ github.ref_name }}
           releaseName: DoomsDesk ${{ github.ref_name }}
           releaseBody: |
