@@ -25,7 +25,6 @@ struct AppState {
     random_password: Arc<AsyncMutex<String>>,
     is_connected: Arc<AsyncMutex<bool>>,
     input_worker: Mutex<Option<InputWorker>>,
-    resource_dir: Mutex<PathBuf>,
     permanent_password: Mutex<String>,
     capture_generation: Arc<AtomicU64>,
     capture_quality: Arc<AtomicU8>,
@@ -127,8 +126,7 @@ fn inject_input(state: State<'_, AppState>, event: Value) -> Result<(), String> 
 fn start_input_worker(state: State<'_, AppState>) {
     let mut lock = state.input_worker.lock().unwrap();
     if lock.is_none() {
-        let resource_dir = state.resource_dir.lock().unwrap().clone();
-        *lock = InputWorker::start(&resource_dir);
+        *lock = InputWorker::start(&std::path::PathBuf::new());
     }
 }
 
@@ -268,10 +266,6 @@ fn main() {
                 .join("config.json");
 
             let cfg = config::load(&config_path);
-            let resource_dir = app
-                .path()
-                .resource_dir()
-                .unwrap_or_else(|_| PathBuf::from("."));
 
             let signal_tx: Arc<AsyncMutex<Option<signaling::SignalTx>>> =
                 Arc::new(AsyncMutex::new(None));
@@ -290,7 +284,6 @@ fn main() {
                 random_password: random_password.clone(),
                 is_connected: is_connected.clone(),
                 input_worker: Mutex::new(None),
-                resource_dir: Mutex::new(resource_dir),
                 permanent_password: Mutex::new(perm_pw.clone()),
                 capture_generation: Arc::new(AtomicU64::new(0)),
                 capture_quality: Arc::new(AtomicU8::new(60)),

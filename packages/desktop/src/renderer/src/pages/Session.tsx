@@ -485,11 +485,14 @@ export default function Session({ peerId, role, onEnd }: Props) {
 
           <ToolBtn
             onClick={() =>
-              navigator.clipboard
-                .readText()
-                .then((text) => invoke('inject_input', { event: { type: 'clipboard', text } }))
+              navigator.clipboard.readText().then((text) => {
+                const dc = dcRef.current
+                if (dc?.readyState === 'open') {
+                  dc.send(JSON.stringify({ type: 'clipboard', text }))
+                }
+              })
             }
-            title="Paste clipboard"
+            title="Paste clipboard to remote"
           >
             <Clipboard size={14} />
           </ToolBtn>

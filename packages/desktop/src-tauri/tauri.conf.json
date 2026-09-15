@@ -37,10 +37,6 @@
       "icons/icon.icns",
       "icons/icon.ico"
     ],
-    "resources": {
-      "../resources/input-worker.py": "resources/input-worker.py",
-      "../resources/input-worker.ps1": "resources/input-worker.ps1"
-    },
     "macOS": {
       "signingIdentity": "-",
       "infoPlist": "Info.plist"
