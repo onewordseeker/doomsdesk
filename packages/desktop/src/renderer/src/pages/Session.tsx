@@ -6,7 +6,7 @@ import RemoteDisplay from '../components/RemoteDisplay'
 import {
   Maximize2, Minimize2, ZoomIn, ZoomOut, Expand, Shrink,
   Clipboard, X, Monitor, MessageSquare, Send, Tv2,
-  Upload, Download, Mic, MicOff, Lock, Activity, Camera
+  Upload, Download, Mic, MicOff, Lock, Activity, Camera, Circle
 } from 'lucide-react'
 
 interface Props {
@@ -80,6 +80,7 @@ export default function Session({ peerId, role, onEnd }: Props) {
   const [fileTransfers, setFileTransfers] = useState<FileTransfer[]>([])
   const [showFiles, setShowFiles] = useState(false)
   const [micActive, setMicActive] = useState(false)
+  const [recording, setRecording] = useState(false)
   const [remoteAudioEl] = useState(() => {
     const el = document.createElement('audio')
     el.autoplay = true
@@ -712,6 +713,15 @@ export default function Session({ peerId, role, onEnd }: Props) {
     }
   }
 
+  async function handleRecordingDone(blob: Blob) {
+    setRecording(false)
+    // Save via Tauri dialog
+    const ab = await blob.arrayBuffer()
+    const data = Array.from(new Uint8Array(ab))
+    const ts = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19)
+    invoke('save_received_file', { name: `session-${ts}.webm`, data }).catch(() => {})
+  }
+
   function sendSpecialKey(combo: string) {
     const dc = dcRef.current
     if (dc?.readyState === 'open') dc.send(JSON.stringify({ type: 'send_keys', combo }))
@@ -856,6 +866,13 @@ export default function Session({ peerId, role, onEnd }: Props) {
 
           <ToolBtn onClick={toggleMic} title={micActive ? 'Mute mic' : 'Enable mic'} active={micActive}>
             {micActive ? <Mic size={14} /> : <MicOff size={14} />}
+          </ToolBtn>
+          <ToolBtn
+            onClick={() => setRecording((v) => !v)}
+            title={recording ? 'Stop recording' : 'Record session'}
+            active={recording}
+          >
+            <Circle size={14} className={recording ? 'fill-red-500 text-red-500' : ''} />
           </ToolBtn>
 
           <ToolBtn onClick={() => sendSpecialKey('lock')} title="Lock remote screen">
@@ -1024,6 +1041,8 @@ export default function Session({ peerId, role, onEnd }: Props) {
         zoom={zoom}
         stretch={stretch}
         connState={connState}
+        recording={recording}
+        onRecordingChunk={handleRecordingDone}
       />
     </div>
   )

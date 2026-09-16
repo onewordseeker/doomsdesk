@@ -7,9 +7,11 @@ interface Props {
   zoom: number
   stretch: boolean
   connState: 'connecting' | 'connected' | 'failed' | 'disconnected'
+  recording?: boolean
+  onRecordingChunk?: (blob: Blob) => void
 }
 
-export default function RemoteDisplay({ framesChannel, dataChannel, remoteScreenSize, zoom, stretch, connState }: Props) {
+export default function RemoteDisplay({ framesChannel, dataChannel, remoteScreenSize, zoom, stretch, connState, recording, onRecordingChunk }: Props) {
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const containerRef = useRef<HTMLDivElement>(null)
   const dcRef = useRef(dataChannel)
@@ -17,8 +19,46 @@ export default function RemoteDisplay({ framesChannel, dataChannel, remoteScreen
   const heldModsRef = useRef({ ctrl: false, shift: false, alt: false, meta: false })
   const [frozen, setFrozen] = useState(false)
   const [hasFrames, setHasFrames] = useState(false)
+  const recorderRef = useRef<MediaRecorder | null>(null)
+  const recChunksRef = useRef<Blob[]>([])
 
   useEffect(() => { dcRef.current = dataChannel }, [dataChannel])
+
+  // Session recording via canvas.captureStream
+  useEffect(() => {
+    const canvas = canvasRef.current
+    if (!canvas || !onRecordingChunk) return
+
+    if (recording) {
+      try {
+        const stream = canvas.captureStream(30)
+        const mimeType = MediaRecorder.isTypeSupported('video/webm;codecs=h264')
+          ? 'video/webm;codecs=h264'
+          : MediaRecorder.isTypeSupported('video/webm;codecs=vp9')
+          ? 'video/webm;codecs=vp9'
+          : 'video/webm'
+        const recorder = new MediaRecorder(stream, { mimeType, videoBitsPerSecond: 6_000_000 })
+        recChunksRef.current = []
+        recorder.ondataavailable = (e) => {
+          if (e.data.size > 0) recChunksRef.current.push(e.data)
+        }
+        recorder.onstop = () => {
+          const blob = new Blob(recChunksRef.current, { type: mimeType })
+          onRecordingChunk(blob)
+          recChunksRef.current = []
+        }
+        recorder.start(1000) // collect chunks every second
+        recorderRef.current = recorder
+      } catch (e) {
+        console.warn('[recording] MediaRecorder failed:', e)
+      }
+    } else {
+      if (recorderRef.current?.state === 'recording') {
+        recorderRef.current.stop()
+        recorderRef.current = null
+      }
+    }
+  }, [recording, onRecordingChunk])
 
   // Decode and render incoming H.264 Annex B frames via WebCodecs VideoDecoder
   useEffect(() => {
