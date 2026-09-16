@@ -81,9 +81,9 @@ mod platform {
         fn CFRelease(cf: *mut c_void);
     }
 
-    // kCGMouseEventDeltaX = 1, kCGMouseEventDeltaY = 2
-    const MOUSE_DELTA_X: i32 = 1;
-    const MOUSE_DELTA_Y: i32 = 2;
+    // kCGMouseEventDeltaX = 4, kCGMouseEventDeltaY = 5 (from CGEvent.h)
+    const MOUSE_DELTA_X: i32 = 4;
+    const MOUSE_DELTA_Y: i32 = 5;
 
     #[inline]
     unsafe fn post_mouse(t: u32, x: f64, y: f64, btn: u32) {

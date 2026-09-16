@@ -6,7 +6,7 @@ import RemoteDisplay from '../components/RemoteDisplay'
 import {
   Maximize2, Minimize2, ZoomIn, ZoomOut, Expand, Shrink,
   Clipboard, X, Monitor, MessageSquare, Send, Tv2,
-  Upload, Download, Mic, MicOff, Lock, Activity, Camera, Circle, Gauge, Crosshair
+  Upload, Download, Mic, MicOff, Lock, Activity, Camera, Circle, Gauge, Crosshair, HelpCircle
 } from 'lucide-react'
 
 interface Props {
@@ -86,6 +86,7 @@ export default function Session({ peerId, role, onEnd }: Props) {
   const [qualityPreset, setQualityPreset] = useState<'auto' | 'lan' | 'wan' | 'low'>('auto')
   const [dragOver, setDragOver] = useState(false)
   const [pointerLockEnabled, setPointerLockEnabled] = useState(false)
+  const [showShortcuts, setShowShortcuts] = useState(false)
   const [remoteAudioEl] = useState(() => {
     const el = document.createElement('audio')
     el.autoplay = true
@@ -177,9 +178,21 @@ export default function Session({ peerId, role, onEnd }: Props) {
     pc.oniceconnectionstatechange = () => { diag(`ICE conn: ${pc.iceConnectionState}`) }
     pc.onicegatheringstatechange = () => { diag(`ICE gather: ${pc.iceGatheringState}`) }
 
+    // Connection timeout: fail after 30s if we never reach 'connected'
+    let connected = false
+    const connTimeout = setTimeout(() => {
+      if (!connected && pc.connectionState !== 'connected') {
+        diag('connection timed out after 30s')
+        setConnState('failed')
+        setInitError('Connection timed out — check TURN server and firewall')
+      }
+    }, 30_000)
+
     pc.onconnectionstatechange = () => {
       diag(`RTC: ${pc.connectionState}`)
       if (pc.connectionState === 'connected') {
+        connected = true
+        clearTimeout(connTimeout)
         setConnState('connected')
       } else if (pc.connectionState === 'disconnected') {
         setConnState('disconnected')
@@ -191,6 +204,7 @@ export default function Session({ peerId, role, onEnd }: Props) {
           }
         }, 3000)
       } else if (pc.connectionState === 'failed') {
+        clearTimeout(connTimeout)
         setConnState('failed')
       }
     }
@@ -767,7 +781,8 @@ export default function Session({ peerId, role, onEnd }: Props) {
     if (role !== 'controller') return
     const onKey = (e: KeyboardEvent) => {
       if (e.key === 'F11') { e.preventDefault(); toggleFullscreen() }
-      else if (e.key === 'Escape') { setShowActionsMenu(false) }
+      else if (e.key === 'Escape') { setShowActionsMenu(false); setShowShortcuts(false) }
+      else if ((e.ctrlKey || e.metaKey) && e.key === 'm') { e.preventDefault(); toggleMic() }
       else if ((e.ctrlKey || e.metaKey) && (e.key === '=' || e.key === '+')) {
         e.preventDefault(); setZoom((z) => Math.min(3, z + 0.25))
       } else if ((e.ctrlKey || e.metaKey) && e.key === '-') {
@@ -812,9 +827,10 @@ export default function Session({ peerId, role, onEnd }: Props) {
   function pickAndSendFile() {
     const input = document.createElement('input')
     input.type = 'file'
+    input.multiple = true
     input.onchange = async () => {
-      const file = input.files?.[0]
-      if (file) await sendFile(file)
+      const files = Array.from(input.files ?? [])
+      for (const file of files) await sendFile(file)
     }
     input.click()
   }
@@ -1056,6 +1072,33 @@ export default function Session({ peerId, role, onEnd }: Props) {
           <ToolBtn onClick={() => setShowDiag((v) => !v)} title="Toggle diagnostics" active={showDiag}>
             <Monitor size={14} />
           </ToolBtn>
+
+          {/* Keyboard shortcuts help */}
+          <div className="relative">
+            <ToolBtn onClick={() => setShowShortcuts((v) => !v)} title="Keyboard shortcuts" active={showShortcuts}>
+              <HelpCircle size={14} />
+            </ToolBtn>
+            {showShortcuts && (
+              <div className="absolute top-full right-0 mt-1 bg-surface border border-surface-border rounded-lg shadow-xl z-30 py-2 px-3 w-56">
+                <p className="text-xs font-semibold text-slate-300 mb-2">Keyboard Shortcuts</p>
+                <div className="space-y-1 text-xs text-slate-400 font-mono">
+                  {[
+                    ['F11', 'Toggle fullscreen'],
+                    ['Ctrl/⌘ +', 'Zoom in'],
+                    ['Ctrl/⌘ -', 'Zoom out'],
+                    ['Ctrl/⌘ 0', 'Reset zoom'],
+                    ['Ctrl/⌘ M', 'Toggle mic'],
+                    ['Esc', 'Exit pointer lock / menus'],
+                  ].map(([key, desc]) => (
+                    <div key={key} className="flex justify-between gap-3">
+                      <span className="bg-black/40 px-1.5 rounded shrink-0">{key}</span>
+                      <span className="text-right text-slate-500">{desc}</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+          </div>
 
           <div className="w-px h-4 bg-surface-border mx-1" />
 
