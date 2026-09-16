@@ -5,7 +5,7 @@ import { getCurrentWindow } from '@tauri-apps/api/window'
 import RemoteDisplay from '../components/RemoteDisplay'
 import {
   Maximize2, Minimize2, ZoomIn, ZoomOut, Expand, Shrink,
-  Clipboard, X, Monitor
+  Clipboard, X, Monitor, MessageSquare, Send
 } from 'lucide-react'
 
 interface Props {
@@ -52,6 +52,9 @@ export default function Session({ peerId, role, onEnd }: Props) {
   const [diagLines, setDiagLines] = useState<string[]>([])
   const [showDiag, setShowDiag] = useState(true)
   const [renderStats, setRenderStats] = useState<{ fps: number; decodeMs: number } | null>(null)
+  const [chatOpen, setChatOpen] = useState(false)
+  const [chatMessages, setChatMessages] = useState<Array<{ from: 'me' | 'them'; text: string; ts: number }>>([])
+  const [chatInput, setChatInput] = useState('')
 
   const pcRef = useRef<RTCPeerConnection | null>(null)
   const dcRef = useRef<RTCDataChannel | null>(null)
@@ -182,12 +185,15 @@ export default function Session({ peerId, role, onEnd }: Props) {
         } else if (msg.type === 'restart_capture') {
           doRestartCapture('restart_capture from controller')
         } else if (msg.type === 'request_clipboard') {
-          // Controller is asking for the agent's current clipboard
           navigator.clipboard.readText().then((text) => {
             if (inputDc.readyState === 'open') {
               inputDc.send(JSON.stringify({ type: 'agent_clipboard', text }))
             }
           }).catch(() => {})
+        } else if (msg.type === 'chat') {
+          // Agent receives a chat message — forward as a Tauri event so the diag panel shows it
+          diag(`[chat] ${msg.text ?? ''}`)
+          // (Agent has no chat UI — only the controller does)
         } else {
           invoke('inject_input', { event: msg })
         }
@@ -318,6 +324,9 @@ export default function Session({ peerId, role, onEnd }: Props) {
               diag(`remote clipboard pulled (${(msg.text ?? '').length} chars)`)
             } else if (msg.type === 'stats') {
               setRenderStats({ fps: msg.fps, decodeMs: msg.decodeMs })
+            } else if (msg.type === 'chat') {
+              setChatMessages((prev) => [...prev, { from: 'them', text: msg.text ?? '', ts: Date.now() }])
+              setChatOpen(true)
             }
           } catch {}
         }
@@ -391,6 +400,14 @@ export default function Session({ peerId, role, onEnd }: Props) {
     invoke('close_session')
     cleanup()
     onEnd()
+  }
+
+  function sendChat(text: string) {
+    const dc = dcRef.current
+    if (!text.trim() || !dc || dc.readyState !== 'open') return
+    dc.send(JSON.stringify({ type: 'chat', text: text.trim() }))
+    setChatMessages((prev) => [...prev, { from: 'me', text: text.trim(), ts: Date.now() }])
+    setChatInput('')
   }
 
   function handleMouseMoveOnContainer() {
@@ -532,6 +549,14 @@ export default function Session({ peerId, role, onEnd }: Props) {
             <Clipboard size={14} style={{ transform: 'scaleX(-1)' }} />
           </ToolBtn>
 
+          <ToolBtn
+            onClick={() => setChatOpen((v) => !v)}
+            title="Chat"
+            active={chatOpen}
+          >
+            <MessageSquare size={14} />
+          </ToolBtn>
+
           <div className="w-px h-4 bg-surface-border mx-1" />
 
           <ToolBtn
@@ -606,6 +631,47 @@ export default function Session({ peerId, role, onEnd }: Props) {
                 </div>
               ))
             )}
+          </div>
+        </div>
+      )}
+
+      {chatOpen && (
+        <div className="absolute bottom-0 left-0 z-20 w-80 max-h-72 bg-black/90 border border-slate-700 rounded-tr-lg flex flex-col">
+          <div className="flex items-center justify-between px-3 py-1.5 border-b border-slate-700 shrink-0">
+            <span className="text-xs text-slate-400 font-mono">Chat</span>
+            <button onClick={() => setChatOpen(false)} className="text-slate-500 hover:text-white">
+              <X size={12} />
+            </button>
+          </div>
+          <div className="flex-1 overflow-y-auto p-2 space-y-1 font-mono text-xs">
+            {chatMessages.length === 0 ? (
+              <span className="text-slate-600">No messages yet…</span>
+            ) : (
+              chatMessages.map((m, i) => (
+                <div key={i} className={`flex flex-col ${m.from === 'me' ? 'items-end' : 'items-start'}`}>
+                  <span className={`px-2 py-1 rounded-lg max-w-[90%] break-words ${
+                    m.from === 'me' ? 'bg-brand/20 text-brand' : 'bg-surface text-slate-300'
+                  }`}>
+                    {m.text}
+                  </span>
+                </div>
+              ))
+            )}
+          </div>
+          <div className="flex items-center gap-1 p-1.5 border-t border-slate-700 shrink-0">
+            <input
+              className="flex-1 bg-surface text-slate-200 text-xs rounded px-2 py-1 outline-none border border-transparent focus:border-brand/50"
+              placeholder="Type a message…"
+              value={chatInput}
+              onChange={(e) => setChatInput(e.target.value)}
+              onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); sendChat(chatInput) } }}
+            />
+            <button
+              onClick={() => sendChat(chatInput)}
+              className="p-1.5 text-slate-400 hover:text-brand"
+            >
+              <Send size={12} />
+            </button>
           </div>
         </div>
       )}
