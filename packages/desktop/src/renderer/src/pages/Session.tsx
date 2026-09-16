@@ -767,20 +767,17 @@ export default function Session({ peerId, role, onEnd }: Props) {
 
   if (role === 'agent') {
     return (
-      <div
-        className="flex items-center justify-between h-screen px-4 bg-black/90 backdrop-blur border border-slate-700/60 rounded-xl select-none"
-        style={{ borderRadius: 12 }}
-      >
+      <div className="flex items-center justify-between h-screen px-4 bg-bg border border-surface-border select-none">
         <div className="flex items-center gap-3">
-          <div className="w-2 h-2 rounded-full bg-red-500 animate-pulse" />
-          <div>
-            <p className="text-xs font-semibold text-white leading-tight">Remote session active</p>
-            <p className="text-xs text-slate-400 font-mono leading-tight">{peerId}</p>
+          <div className="w-2 h-2 rounded-full bg-red-500 animate-pulse shrink-0" />
+          <div className="min-w-0">
+            <p className="text-xs font-semibold text-white leading-tight">Being controlled</p>
+            <p className="text-xs text-slate-500 font-mono leading-tight truncate">{peerId}</p>
           </div>
         </div>
         <button
           onClick={handleEnd}
-          className="px-3 py-1.5 text-xs font-medium text-red-400 border border-red-500/40 rounded-lg hover:bg-red-500/10 transition-colors"
+          className="ml-3 shrink-0 px-3 py-1.5 text-xs font-medium text-red-400 border border-red-500/30 rounded-lg hover:bg-red-500/10 transition-colors"
         >
           End
         </button>
