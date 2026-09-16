@@ -242,6 +242,45 @@ async fn save_received_file(app: AppHandle, name: String, data: Vec<u8>) -> Resu
     Ok(())
 }
 
+/// Check macOS permissions needed for remote desktop (accessibility + screen recording).
+#[tauri::command]
+fn check_macos_permissions() -> serde_json::Value {
+    #[cfg(target_os = "macos")]
+    {
+        let accessibility = check_ax_permission();
+        // Screen recording: attempt a quick capture; if it returns nothing, permission is denied
+        let screen_recording = capture::capture_screen_at(0).is_some();
+        serde_json::json!({ "accessibility": accessibility, "screenRecording": screen_recording })
+    }
+    #[cfg(not(target_os = "macos"))]
+    serde_json::json!({ "accessibility": true, "screenRecording": true })
+}
+
+#[cfg(target_os = "macos")]
+fn check_ax_permission() -> bool {
+    use std::os::raw::c_int;
+    #[link(name = "ApplicationServices", kind = "framework")]
+    extern "C" {
+        fn AXIsProcessTrusted() -> c_int;
+    }
+    unsafe { AXIsProcessTrusted() != 0 }
+}
+
+/// Open macOS System Settings to a specific privacy pane.
+#[tauri::command]
+fn open_privacy_settings(pane: String) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    {
+        let url = match pane.as_str() {
+            "accessibility" => "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility",
+            "screenRecording" => "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture",
+            _ => return Ok(()),
+        };
+        std::process::Command::new("open").arg(url).spawn().map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
 /// Resize the agent-banner window height (used when chat panel opens/closes).
 #[tauri::command]
 fn resize_agent_window(app: AppHandle, height: u32) {
@@ -659,6 +698,8 @@ fn main() {
             get_launch_on_startup,
             update_tray_tooltip,
             resize_agent_window,
+            check_macos_permissions,
+            open_privacy_settings,
         ])
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {

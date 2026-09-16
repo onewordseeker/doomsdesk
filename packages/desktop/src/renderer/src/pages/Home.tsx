@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react'
 import { invoke } from '@tauri-apps/api/core'
 import { listen } from '@tauri-apps/api/event'
-import { Copy, Eye, EyeOff, RefreshCw, Settings, Globe, Wifi, WifiOff, Clock, X, Lock } from 'lucide-react'
+import { Copy, Eye, EyeOff, RefreshCw, Settings, Globe, Wifi, WifiOff, Clock, X, Lock, AlertTriangle } from 'lucide-react'
 import appIcon from '../assets/icon.png'
 
 interface RecentDevice {
@@ -56,6 +56,7 @@ export default function Home() {
   const [recentDevices, setRecentDevices] = useState<RecentDevice[]>(loadRecents)
   const [serverRtt, setServerRtt] = useState<number | null>(null)
   const [webUrl, setWebUrl] = useState('https://doomsdesk.hamidentifier.cloud')
+  const [perms, setPerms] = useState<{ accessibility: boolean; screenRecording: boolean } | null>(null)
   const pollRef = useRef<ReturnType<typeof setInterval>>()
 
   // Refs so the stale signaling-message closure can read current form values
@@ -124,17 +125,19 @@ export default function Home() {
   }, [])
 
   async function load() {
-    const [id, pw, online, config] = await Promise.all([
+    const [id, pw, online, config, p] = await Promise.all([
       invoke<string>('get_device_id'),
       invoke<string>('get_random_password'),
       invoke<boolean>('is_server_connected'),
       invoke<{ permanentPassword: string; webUrl?: string }>('get_config'),
+      invoke<{ accessibility: boolean; screenRecording: boolean }>('check_macos_permissions'),
     ])
     setDeviceId(id)
     if (pw) setRandomPw(pw)
     setServerOnline(online)
     setPermPw(config.permanentPassword ?? '')
     if (config.webUrl) setWebUrl(config.webUrl)
+    setPerms(p)
   }
 
   function copy(text: string, type: 'id' | 'pw') {
@@ -209,6 +212,38 @@ export default function Home() {
           </button>
         </div>
       </div>
+
+      {/* macOS permission warnings */}
+      {perms && (!perms.accessibility || !perms.screenRecording) && (
+        <div className="px-4 py-2 bg-amber-900/30 border-b border-amber-500/20 text-xs text-amber-300 flex items-center gap-3">
+          <AlertTriangle size={13} className="shrink-0 text-amber-400" />
+          <span className="flex-1">
+            {!perms.screenRecording && !perms.accessibility
+              ? 'Screen Recording and Accessibility permissions required to receive help.'
+              : !perms.screenRecording
+              ? 'Screen Recording permission required to share your screen.'
+              : 'Accessibility permission required to receive keyboard/mouse control.'}
+          </span>
+          <div className="flex gap-2 shrink-0">
+            {!perms.screenRecording && (
+              <button
+                onClick={() => invoke('open_privacy_settings', { pane: 'screenRecording' })}
+                className="underline hover:text-amber-200 transition-colors"
+              >
+                Screen Recording
+              </button>
+            )}
+            {!perms.accessibility && (
+              <button
+                onClick={() => invoke('open_privacy_settings', { pane: 'accessibility' })}
+                className="underline hover:text-amber-200 transition-colors"
+              >
+                Accessibility
+              </button>
+            )}
+          </div>
+        </div>
+      )}
 
       <div className="flex flex-1 overflow-hidden">
         {/* Left panel — My Device */}
