@@ -332,6 +332,12 @@ export default function RemoteDisplay({ framesChannel, dataChannel, remoteScreen
       dx = xlines * 20
 
       if (lines === 0 && xlines === 0) return
+    } else {
+      // Line mode (physical mouse wheel) or page mode — normalize to pixel-equivalent
+      // so the agent handlers (which expect pixel units) produce correct scroll ticks
+      const scale = e.deltaMode === 1 ? 30 : 300
+      dy = Math.round(dy * scale)
+      dx = Math.round(dx * scale)
     }
     sendInput({ type: 'wheel', deltaX: dx, deltaY: dy })
   }, [dataChannel, onLocalZoom])
