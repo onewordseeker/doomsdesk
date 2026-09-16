@@ -78,7 +78,7 @@ mod platform {
         fn CGEventSetIntegerValueField(ev: *mut c_void, field: i32, val: i64);
         fn CGEventGetLocation(ev: *mut c_void) -> CGPoint;
         fn CGEventCreate(src: *mut c_void) -> *mut c_void;
-        fn CFRelease(cf: *mut c_void);
+        fn CFRelease(cf: *const c_void);
     }
 
     // kCGMouseEventDeltaX = 4, kCGMouseEventDeltaY = 5 (from CGEvent.h)
@@ -208,16 +208,20 @@ mod platform {
                 "mousedown" | "click" => {
                     let click = t == "click";
                     match btn {
-                        "right"  => { post_mouse(RD, x, y, BR); if click { post_mouse(RU, x, y, BR); } }
-                        "middle" => { post_mouse(MD, x, y, BM); if click { post_mouse(MU, x, y, BM); } }
-                        _        => { post_mouse(LD, x, y, BL); if click { post_mouse(LU, x, y, BL); } }
+                        "right"   => { post_mouse(RD, x, y, BR); if click { post_mouse(RU, x, y, BR); } }
+                        "middle"  => { post_mouse(MD, x, y, BM); if click { post_mouse(MU, x, y, BM); } }
+                        "back"    => { post_mouse(MD, x, y, 3);  if click { post_mouse(MU, x, y, 3); } }
+                        "forward" => { post_mouse(MD, x, y, 4);  if click { post_mouse(MU, x, y, 4); } }
+                        _         => { post_mouse(LD, x, y, BL); if click { post_mouse(LU, x, y, BL); } }
                     }
                 }
 
                 "mouseup" => match btn {
-                    "right"  => post_mouse(RU, x, y, BR),
-                    "middle" => post_mouse(MU, x, y, BM),
-                    _        => post_mouse(LU, x, y, BL),
+                    "right"   => post_mouse(RU, x, y, BR),
+                    "middle"  => post_mouse(MU, x, y, BM),
+                    "back"    => post_mouse(MU, x, y, 3),
+                    "forward" => post_mouse(MU, x, y, 4),
+                    _         => post_mouse(LU, x, y, BL),
                 },
 
                 "dblclick" => {
@@ -321,9 +325,13 @@ mod platform {
     const RIGHTUP:    u32 = 0x0010;
     const MIDDLEDOWN: u32 = 0x0020;
     const MIDDLEUP:   u32 = 0x0040;
+    const XDOWN:      u32 = 0x0080;
+    const XUP:        u32 = 0x0100;
     const WHEEL:      u32 = 0x0800;
     const HWHEEL:     u32 = 0x1000;
     const KEYUP:      u32 = 0x0002;
+    const XBUTTON1:   u32 = 0x0001; // back
+    const XBUTTON2:   u32 = 0x0002; // forward
 
     #[link(name = "user32")]
     extern "system" {
@@ -388,6 +396,14 @@ mod platform {
                             mouse_event(MIDDLEDOWN, 0, 0, 0, 0);
                             if click { mouse_event(MIDDLEUP, 0, 0, 0, 0); }
                         }
+                        "back" => {
+                            mouse_event(XDOWN, 0, 0, XBUTTON1, 0);
+                            if click { mouse_event(XUP, 0, 0, XBUTTON1, 0); }
+                        }
+                        "forward" => {
+                            mouse_event(XDOWN, 0, 0, XBUTTON2, 0);
+                            if click { mouse_event(XUP, 0, 0, XBUTTON2, 0); }
+                        }
                         _ => {
                             mouse_event(LEFTDOWN, 0, 0, 0, 0);
                             if click { mouse_event(LEFTUP, 0, 0, 0, 0); }
@@ -396,9 +412,11 @@ mod platform {
                 }
 
                 "mouseup" => match btn {
-                    "right"  => mouse_event(RIGHTUP,  0, 0, 0, 0),
-                    "middle" => mouse_event(MIDDLEUP, 0, 0, 0, 0),
-                    _        => mouse_event(LEFTUP,   0, 0, 0, 0),
+                    "right"   => mouse_event(RIGHTUP,  0, 0, 0, 0),
+                    "middle"  => mouse_event(MIDDLEUP, 0, 0, 0, 0),
+                    "back"    => mouse_event(XUP,      0, 0, XBUTTON1, 0),
+                    "forward" => mouse_event(XUP,      0, 0, XBUTTON2, 0),
+                    _         => mouse_event(LEFTUP,   0, 0, 0, 0),
                 },
 
                 "dblclick" => {

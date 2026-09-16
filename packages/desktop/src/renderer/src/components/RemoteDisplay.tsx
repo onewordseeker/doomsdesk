@@ -269,6 +269,14 @@ export default function RemoteDisplay({ framesChannel, dataChannel, remoteScreen
     }
   }, [dataChannel, remoteScreenSize, stretch])
 
+  function remoteButton(b: number): string {
+    if (b === 1) return 'middle'
+    if (b === 2) return 'right'
+    if (b === 3) return 'back'
+    if (b === 4) return 'forward'
+    return 'left'
+  }
+
   const onMouseDown = useCallback((e: React.MouseEvent) => {
     e.preventDefault()
     containerRef.current?.focus()
@@ -276,19 +284,18 @@ export default function RemoteDisplay({ framesChannel, dataChannel, remoteScreen
     if (pointerLockEnabled && !pointerLockedRef.current && e.button === 0) {
       canvasRef.current?.requestPointerLock()
     }
+    const button = remoteButton(e.button)
     if (!pointerLockedRef.current) {
       const { x, y } = toRemote(e)
-      const button = e.button === 2 ? 'right' : e.button === 1 ? 'middle' : 'left'
       sendInput({ type: 'mousedown', x, y, button })
     } else {
-      const button = e.button === 2 ? 'right' : e.button === 1 ? 'middle' : 'left'
       sendInput({ type: 'mousedown', x: 0, y: 0, button })
     }
   }, [dataChannel, remoteScreenSize, stretch, pointerLockEnabled])
 
   const onMouseUp = useCallback((e: React.MouseEvent) => {
     e.preventDefault()
-    const button = e.button === 2 ? 'right' : e.button === 1 ? 'middle' : 'left'
+    const button = remoteButton(e.button)
     if (pointerLockedRef.current) {
       sendInput({ type: 'mouseup', x: 0, y: 0, button })
     } else {
@@ -353,7 +360,8 @@ export default function RemoteDisplay({ framesChannel, dataChannel, remoteScreen
   const onMouseLeave = useCallback((e: React.MouseEvent) => {
     if (e.buttons !== 0) {
       const { x, y } = toRemote(e)
-      const button = e.buttons === 2 ? 'right' : e.buttons === 4 ? 'middle' : 'left'
+      // e.buttons is a bitmask: 1=left, 2=right, 4=middle, 8=back, 16=forward
+      const button = e.buttons === 2 ? 'right' : e.buttons === 4 ? 'middle' : e.buttons === 8 ? 'back' : e.buttons === 16 ? 'forward' : 'left'
       sendInput({ type: 'mouseup', x, y, button })
     }
   }, [dataChannel, remoteScreenSize, stretch])
