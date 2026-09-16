@@ -334,10 +334,9 @@ mod platform {
                                 .spawn();
                         }
                         "show_desktop" => {
-                            // macOS: Mission Control show desktop — Cmd+F3 (fn key 3 = show desktop)
-                            // Alternatively: expose all windows via Ctrl+F3
+                            // Hide all visible processes to reveal the desktop
                             let _ = std::process::Command::new("osascript")
-                                .args(["-e", "tell application \"Finder\" to set visible of every process whose frontmost is true to false"])
+                                .args(["-e", "tell application \"System Events\" to set visible of every process whose visible is true to false"])
                                 .spawn();
                         }
                         "shutdown" => {
@@ -405,13 +404,15 @@ mod platform {
     fn web_key_to_vk(key: &str) -> Option<u8> {
         Some(match key {
             "Backspace" => 0x08, "Tab" => 0x09, "Enter" => 0x0D,
-            "Shift" => 0x10, "Control" => 0x11, "Alt" => 0x12,
+            "Pause" => 0x13, "Shift" => 0x10, "Control" => 0x11, "Alt" => 0x12,
             "CapsLock" => 0x14, "Escape" => 0x1B, " " => 0x20,
             "PageUp" => 0x21, "PageDown" => 0x22,
             "End" => 0x23, "Home" => 0x24,
             "ArrowLeft" => 0x25, "ArrowUp" => 0x26,
             "ArrowRight" => 0x27, "ArrowDown" => 0x28,
-            "Insert" => 0x2D, "Delete" => 0x2E, "Meta" => 0x5B,
+            "PrintScreen" => 0x2C, "Insert" => 0x2D, "Delete" => 0x2E,
+            "Meta" => 0x5B, "ContextMenu" => 0x5D,
+            "NumLock" => 0x90, "ScrollLock" => 0x91,
             "F1"  => 0x70, "F2"  => 0x71, "F3"  => 0x72, "F4"  => 0x73,
             "F5"  => 0x74, "F6"  => 0x75, "F7"  => 0x76, "F8"  => 0x77,
             "F9"  => 0x78, "F10" => 0x79, "F11" => 0x7A, "F12" => 0x7B,
