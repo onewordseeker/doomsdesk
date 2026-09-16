@@ -98,10 +98,16 @@ export default function Home() {
       setServerRtt(e.payload.rtt)
     })
 
+    const unsubDisc = listen<void>('server-disconnected', () => {
+      setServerOnline(false)
+      setServerRtt(null)
+    })
+
     return () => {
       clearInterval(pollRef.current)
       unsubSignal.then((f) => f())
       unsubRtt.then((f) => f())
+      unsubDisc.then((f) => f())
     }
   }, [])
 
@@ -441,16 +447,18 @@ export default function Home() {
 function SettingsOverlay({ onClose }: { onClose: () => void }) {
   const [config, setConfigState] = useState<Record<string, unknown>>({})
   const [serverUrl, setServerUrl] = useState('')
+  const [startMinimized, setStartMinimized] = useState(false)
 
   useEffect(() => {
     invoke<Record<string, unknown>>('get_config').then((c) => {
       setConfigState(c)
       setServerUrl(c.serverUrl as string)
+      setStartMinimized(!!(c.startMinimized))
     })
   }, [])
 
   async function save() {
-    await invoke('set_config', { partial: { serverUrl } })
+    await invoke('set_config', { partial: { serverUrl, startMinimized } })
     onClose()
   }
 
@@ -473,6 +481,21 @@ function SettingsOverlay({ onClose }: { onClose: () => void }) {
               className="w-full bg-bg border border-surface-border rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-brand"
             />
           </div>
+          <label className="flex items-center gap-3 cursor-pointer">
+            <div
+              onClick={() => setStartMinimized((v) => !v)}
+              className={`w-4 h-4 rounded border flex items-center justify-center transition-colors shrink-0 ${
+                startMinimized ? 'bg-brand border-brand' : 'border-surface-border bg-bg'
+              }`}
+            >
+              {startMinimized && (
+                <svg className="w-2.5 h-2.5 text-white" fill="none" viewBox="0 0 10 10">
+                  <path d="M1.5 5l2.5 2.5 4.5-4.5" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+                </svg>
+              )}
+            </div>
+            <span className="text-xs text-slate-400 select-none">Start minimized to tray</span>
+          </label>
           <p className="text-xs text-slate-600">
             Device ID:{' '}
             <span className="text-slate-400 font-mono">{config.deviceId as string}</span>

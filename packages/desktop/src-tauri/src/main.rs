@@ -458,6 +458,7 @@ fn main() {
             let perm_pw = cfg.permanent_password.clone();
             let server_url = cfg.server_url.clone();
             let device_id = cfg.device_id.clone();
+            let start_minimized = cfg.start_minimized;
 
             // Broadcast channel for raw H.264 frames; capacity 8 allows brief bursts
             let (frame_tx, _) = broadcast::channel::<Vec<u8>>(8);
@@ -489,7 +490,11 @@ fn main() {
             );
 
             if let Some(win) = app.get_webview_window("main") {
-                let _ = win.show();
+                if start_minimized {
+                    let _ = win.hide();
+                } else {
+                    let _ = win.show();
+                }
             }
 
             setup_tray(app)?;
