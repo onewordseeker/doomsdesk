@@ -18,7 +18,7 @@ use tauri::{
     tray::{MouseButton, TrayIconBuilder, TrayIconEvent},
     AppHandle, Emitter, Manager, State,
 };
-use tokio::sync::Mutex as AsyncMutex;
+use tokio::sync::{broadcast, Mutex as AsyncMutex};
 
 struct AppState {
     config_path: Mutex<PathBuf>,
@@ -31,6 +31,9 @@ struct AppState {
     capture_generation: Arc<AtomicU64>,
     capture_quality: Arc<AtomicU8>,
     capture_bitrate: Arc<AtomicU32>,
+    capture_display: Arc<AtomicU32>,           // 0 = primary
+    frame_tx: broadcast::Sender<Vec<u8>>,      // binary H.264 frames; empty vec = stop signal
+    ws_handle: Mutex<Option<tokio::task::JoinHandle<()>>>,
 }
 
 // ── Commands ──────────────────────────────────────────────────────────────────
@@ -148,9 +151,7 @@ fn toggle_fullscreen(window: tauri::Window) {
 }
 
 #[tauri::command]
-fn session_ready() {
-    // No-op in Tauri — sessions start via URL params or events
-}
+fn session_ready() {}
 
 #[tauri::command]
 async fn report_agent_error(app: AppHandle, msg: String) -> Result<(), String> {
@@ -180,42 +181,120 @@ fn forward_agent_log(app: AppHandle, msg: String) {
     let _ = app.emit("agent-log", msg);
 }
 
+/// Returns the list of connected displays.
 #[tauri::command]
-async fn start_native_capture(app: AppHandle, state: State<'_, AppState>) -> Result<(), String> {
-    use screenshots::image::{DynamicImage, imageops::FilterType, RgbaImage};
-    use base64::Engine;
+fn list_monitors() -> Vec<Value> {
+    capture::list_displays()
+        .into_iter()
+        .map(|d| serde_json::json!({
+            "id": d.id,
+            "width": d.width,
+            "height": d.height,
+            "isMain": d.is_main,
+        }))
+        .collect()
+}
 
-    let gen_ref     = state.capture_generation.clone();
+/// Switch which display is being captured. 0 = primary.
+#[tauri::command]
+fn set_capture_monitor(state: State<'_, AppState>, display_id: u32) {
+    state.capture_display.store(display_id, Ordering::Relaxed);
+}
+
+/// Start screen capture + local binary WebSocket server.
+/// Returns the port the WS server is listening on.
+/// The agent window connects to ws://127.0.0.1:{port} and receives raw H.264 Annex B frames.
+#[tauri::command]
+async fn start_native_capture(app: AppHandle, state: State<'_, AppState>) -> Result<u16, String> {
+    use tokio::net::TcpListener;
+    use tokio_tungstenite::accept_async;
+    use futures_util::{SinkExt, StreamExt};
+    use tokio_tungstenite::tungstenite::Message;
+
+    // Abort any previous WS server task
+    if let Some(handle) = state.ws_handle.lock().unwrap().take() {
+        handle.abort();
+    }
+
+    // Bind on OS-assigned port — eliminates port conflicts
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .map_err(|e| format!("capture WS bind: {}", e))?;
+    let port = listener.local_addr().unwrap().port();
+
+    let frame_tx = state.frame_tx.clone();
+
+    // WS server: forward broadcast frames to any connected client
+    let ws_task = tokio::spawn(async move {
+        loop {
+            match listener.accept().await {
+                Ok((stream, _)) => {
+                    let mut rx = frame_tx.subscribe();
+                    tokio::spawn(async move {
+                        if let Ok(ws) = accept_async(stream).await {
+                            let (mut sink, _) = ws.split();
+                            loop {
+                                match rx.recv().await {
+                                    Ok(data) => {
+                                        // Empty vec = capture stopped; send Close and exit
+                                        if data.is_empty() {
+                                            let _ = sink.send(Message::Close(None)).await;
+                                            break;
+                                        }
+                                        if sink.send(Message::Binary(data.into())).await.is_err() {
+                                            break;
+                                        }
+                                    }
+                                    Err(broadcast::error::RecvError::Closed) => break,
+                                    // Lagged = encoder outpaced the subscriber; skip frames rather than crash
+                                    Err(broadcast::error::RecvError::Lagged(_)) => {}
+                                }
+                            }
+                        }
+                    });
+                }
+                Err(_) => break,
+            }
+        }
+    });
+
+    *state.ws_handle.lock().unwrap() = Some(ws_task);
+
+    // Capture + encode loop (blocking thread)
+    let gen_ref = state.capture_generation.clone();
     let bitrate_ref = state.capture_bitrate.clone();
-
-    // Increment generation — any running loop with the old gen exits on next iteration.
+    let display_ref = state.capture_display.clone();
+    let frame_tx2 = state.frame_tx.clone();
     let my_gen = gen_ref.fetch_add(1, Ordering::SeqCst) + 1;
 
     tauri::async_runtime::spawn_blocking(move || {
+        use screenshots::image::{DynamicImage, imageops::FilterType, RgbaImage};
+
         let mut encoder: Option<encode::H264Encoder> = None;
         let mut pts_ms: u64 = 0;
         let mut last_frame_hash: u64 = 0;
         let mut last_send_ms: u64 = 0;
         let mut last_bitrate: u32 = 0;
         const FRAME_MS: u64 = 33;          // ~30 fps
-        const IDLE_FORCE_MS: u64 = 2_000;  // keepalive: force send every 2s even if static
+        const IDLE_FORCE_MS: u64 = 2_000;  // force keyalive even if screen is static
 
         loop {
-            if gen_ref.load(Ordering::SeqCst) != my_gen { break; }
+            if gen_ref.load(Ordering::SeqCst) != my_gen {
+                let _ = frame_tx2.send(vec![]); // signal WS clients to close
+                break;
+            }
 
             let frame_start = std::time::Instant::now();
+            let display_id = display_ref.load(Ordering::Relaxed);
 
             let ok = (|| -> Option<()> {
-                // capture::capture_screen() uses CGDisplayCreateImage on macOS (CoreGraphics,
-                // not deprecated) and the screenshots crate on Windows.
-                let frame = capture::capture_screen()?;
+                let frame = capture::capture_screen_at(display_id)?;
                 let (w, h) = (frame.width, frame.height);
 
-                // Build DynamicImage for resize — reuse the Vec<u8> allocation
                 let rgba_img = RgbaImage::from_raw(w, h, frame.data)?;
                 let dyn_img = DynamicImage::ImageRgba8(rgba_img);
 
-                // Cap at 1920 px wide — full HD ceiling, limits bandwidth
+                // Cap at 1920 px wide to limit bandwidth; use Triangle filter (fast + good)
                 let (eff_w, eff_h, rgba) = if w > 1920 {
                     let eff_h = (h as f64 * 1920.0 / w as f64) as u32;
                     let resized = dyn_img.resize(1920, eff_h, FilterType::Triangle);
@@ -226,7 +305,7 @@ async fn start_native_capture(app: AppHandle, state: State<'_, AppState>) -> Res
                     (w, h, dyn_img.into_rgba8().into_raw())
                 };
 
-                // (Re)create encoder on dimension change
+                // Recreate encoder only when resolution changes
                 if encoder.as_ref().map(|e| e.dimensions()) != Some((eff_w, eff_h)) {
                     encoder = encode::H264Encoder::new(eff_w, eff_h);
                     pts_ms = 0;
@@ -235,14 +314,14 @@ async fn start_native_capture(app: AppHandle, state: State<'_, AppState>) -> Res
                 }
                 let enc = encoder.as_mut()?;
 
-                // Live bitrate adaptation — VT accepts updates without session restart
+                // Live bitrate adaptation — no encoder recreation needed on macOS
                 let wanted_bps = bitrate_ref.load(Ordering::Relaxed);
                 if wanted_bps != last_bitrate && wanted_bps > 0 {
                     enc.set_bitrate(wanted_bps);
                     last_bitrate = wanted_bps;
                 }
 
-                // Cheap perceptual hash — sample every 512th byte, LCG-mix with index
+                // Perceptual hash: sample every 512th byte with LCG mix
                 let hash: u64 = rgba
                     .chunks_exact(512)
                     .enumerate()
@@ -254,15 +333,15 @@ async fn start_native_capture(app: AppHandle, state: State<'_, AppState>) -> Res
 
                 let idle_too_long = pts_ms.saturating_sub(last_send_ms) >= IDLE_FORCE_MS;
                 if hash == last_frame_hash && !idle_too_long {
-                    return Some(()); // static screen, keepalive not due
+                    return Some(()); // static screen, no need to encode
                 }
                 last_frame_hash = hash;
 
                 let encoded = enc.encode(&rgba, pts_ms)?;
                 last_send_ms = pts_ms;
 
-                let b64 = base64::engine::general_purpose::STANDARD.encode(&encoded.data);
-                let _ = app.emit("screen-frame", b64);
+                // Send raw binary — no base64 encoding overhead
+                let _ = frame_tx2.send(encoded.data);
                 Some(())
             })();
 
@@ -280,12 +359,17 @@ async fn start_native_capture(app: AppHandle, state: State<'_, AppState>) -> Res
         }
     });
 
-    Ok(())
+    Ok(port)
 }
 
 #[tauri::command]
 fn stop_native_capture(state: State<'_, AppState>) {
+    // Increment generation — the capture loop exits on next iteration
     state.capture_generation.fetch_add(1, Ordering::SeqCst);
+    // Abort the WS server task immediately
+    if let Some(handle) = state.ws_handle.lock().unwrap().take() {
+        handle.abort();
+    }
 }
 
 #[tauri::command]
@@ -296,7 +380,7 @@ fn set_capture_quality(state: State<'_, AppState>, quality: u8) {
 
 #[tauri::command]
 fn set_capture_bitrate(state: State<'_, AppState>, bps: u32) {
-    let clamped = bps.clamp(500_000, 8_000_000);
+    let clamped = bps.clamp(2_000_000, 8_000_000);
     state.capture_bitrate.store(clamped, Ordering::Relaxed);
 }
 
@@ -326,6 +410,9 @@ fn main() {
             let server_url = cfg.server_url.clone();
             let device_id = cfg.device_id.clone();
 
+            // Broadcast channel for raw H.264 frames; capacity 8 allows brief bursts
+            let (frame_tx, _) = broadcast::channel::<Vec<u8>>(8);
+
             app.manage(AppState {
                 config_path: Mutex::new(config_path),
                 config: Mutex::new(cfg),
@@ -337,9 +424,11 @@ fn main() {
                 capture_generation: Arc::new(AtomicU64::new(0)),
                 capture_quality: Arc::new(AtomicU8::new(60)),
                 capture_bitrate: Arc::new(AtomicU32::new(0)),
+                capture_display: Arc::new(AtomicU32::new(0)),
+                frame_tx,
+                ws_handle: Mutex::new(None),
             });
 
-            // Start signaling loop
             signaling::start(
                 app.handle().clone(),
                 server_url,
@@ -350,14 +439,11 @@ fn main() {
                 is_connected,
             );
 
-            // Show main window (created with visible: false)
             if let Some(win) = app.get_webview_window("main") {
                 let _ = win.show();
             }
 
-            // Set up system tray
             setup_tray(app)?;
-
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -382,11 +468,12 @@ fn main() {
             stop_native_capture,
             set_capture_quality,
             set_capture_bitrate,
+            list_monitors,
+            set_capture_monitor,
         ])
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
                 if window.label() == "main" {
-                    // Minimize to tray instead of closing
                     window.hide().ok();
                     api.prevent_close();
                 }

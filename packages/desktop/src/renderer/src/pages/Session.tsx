@@ -5,13 +5,20 @@ import { getCurrentWindow } from '@tauri-apps/api/window'
 import RemoteDisplay from '../components/RemoteDisplay'
 import {
   Maximize2, Minimize2, ZoomIn, ZoomOut, Expand, Shrink,
-  Clipboard, X, Monitor, MessageSquare, Send
+  Clipboard, X, Monitor, MessageSquare, Send, Tv2
 } from 'lucide-react'
 
 interface Props {
   peerId: string
   role: 'controller' | 'agent'
   onEnd: () => void
+}
+
+interface MonitorInfo {
+  id: number
+  width: number
+  height: number
+  isMain: boolean
 }
 
 const ICE_SERVERS: RTCIceServer[] = [
@@ -55,9 +62,13 @@ export default function Session({ peerId, role, onEnd }: Props) {
   const [chatOpen, setChatOpen] = useState(false)
   const [chatMessages, setChatMessages] = useState<Array<{ from: 'me' | 'them'; text: string; ts: number }>>([])
   const [chatInput, setChatInput] = useState('')
+  // Agent-side monitor list (populated once DC opens)
+  const [agentMonitors, setAgentMonitors] = useState<MonitorInfo[]>([])
+  const [selectedMonitor, setSelectedMonitor] = useState<number>(0) // 0 = primary
 
   const pcRef = useRef<RTCPeerConnection | null>(null)
   const dcRef = useRef<RTCDataChannel | null>(null)
+  const frameWsRef = useRef<WebSocket | null>(null)
   const agentCleanupRef = useRef<(() => void) | null>(null)
   const origScreenRef = useRef<{ width: number; height: number } | null>(null)
   const durationRef = useRef<ReturnType<typeof setInterval>>()
@@ -145,32 +156,57 @@ export default function Session({ peerId, role, onEnd }: Props) {
   async function setupAgentSide(pc: RTCPeerConnection) {
     diag('setting up agent data channels')
 
-    const framesDc = pc.createDataChannel('frames')
+    const framesDc = pc.createDataChannel('frames', { ordered: false, maxRetransmits: 0 })
     const inputDc = pc.createDataChannel('input')
     setDataChannel(inputDc)
     dcRef.current = inputDc
 
     const agentCleanups: Array<() => void> = []
 
-    // Adaptive bitrate state — declared early so all handlers can reference them
     let framesSent = 0
     let framesSkipped = 0
-    let currentBps = 4_000_000   // start at 4 Mbps
+    let currentBps = 4_000_000
     let stableWindows = 0
     let consecutiveErrors = 0
     let captureRestarting = false
 
+    // Connect to the local binary WS that the Rust capture loop writes to
+    async function connectFrameWs() {
+      const port = await invoke<number>('start_native_capture')
+      const ws = new WebSocket(`ws://127.0.0.1:${port}`)
+      ws.binaryType = 'arraybuffer'
+
+      ws.onmessage = (ev) => {
+        if (!(ev.data instanceof ArrayBuffer)) return
+        if (ev.data.byteLength === 0) return   // stop signal
+        consecutiveErrors = 0
+        if (framesDc.readyState !== 'open') return
+        if (framesDc.bufferedAmount > 262144) { framesSkipped++; return }
+        // Send raw binary directly — no base64 decode overhead
+        framesDc.send(ev.data)
+        framesSent++
+      }
+
+      ws.onerror = () => diag('frame WS error')
+      ws.onclose = () => diag('frame WS closed')
+      frameWsRef.current = ws
+      diag(`capture WS on port ${port}`)
+    }
+
     function doRestartCapture(reason: string) {
       if (captureRestarting) return
       captureRestarting = true
-      diag(`${reason} — resetting bitrate, restarting capture`)
+      diag(`${reason} — resetting, restarting capture`)
       currentBps = 4_000_000
       consecutiveErrors = 0
       invoke('set_capture_bitrate', { bps: 4_000_000 }).catch(() => {})
+
+      frameWsRef.current?.close()
+      frameWsRef.current = null
       invoke('stop_native_capture').catch(() => {})
-      // 500ms lets Windows display settle after a resolution change
-      setTimeout(() => {
-        invoke('start_native_capture').catch(() => {})
+
+      setTimeout(async () => {
+        await connectFrameWs()
         captureRestarting = false
       }, 500)
     }
@@ -184,6 +220,11 @@ export default function Session({ peerId, role, onEnd }: Props) {
           invoke('inject_input', { event: { type: 'set_display_resolution', width, height } })
         } else if (msg.type === 'restart_capture') {
           doRestartCapture('restart_capture from controller')
+        } else if (msg.type === 'switch_monitor') {
+          const id = (msg as any).displayId as number ?? 0
+          diag(`switch monitor → ${id}`)
+          invoke('set_capture_monitor', { displayId: id }).catch(() => {})
+          doRestartCapture(`monitor switch to ${id}`)
         } else if (msg.type === 'request_clipboard') {
           navigator.clipboard.readText().then((text) => {
             if (inputDc.readyState === 'open') {
@@ -191,21 +232,24 @@ export default function Session({ peerId, role, onEnd }: Props) {
             }
           }).catch(() => {})
         } else if (msg.type === 'chat') {
-          // Agent receives a chat message — forward as a Tauri event so the diag panel shows it
           diag(`[chat] ${msg.text ?? ''}`)
-          // (Agent has no chat UI — only the controller does)
         } else {
           invoke('inject_input', { event: msg })
         }
       } catch {}
     }
 
-    inputDc.onopen = () => {
-      diag('input DC open — starting input worker, sending screen_info')
+    inputDc.onopen = async () => {
+      diag('input DC open — starting input worker')
       invoke('start_input_worker').catch(() => {})
       inputDc.send(
         JSON.stringify({ type: 'screen_info', width: window.screen.width, height: window.screen.height })
       )
+      // Send monitor list to controller
+      try {
+        const monitors = await invoke<MonitorInfo[]>('list_monitors')
+        inputDc.send(JSON.stringify({ type: 'monitor_list', monitors }))
+      } catch {}
     }
 
     framesDc.onopen = () => diag('frames DC open')
@@ -214,7 +258,7 @@ export default function Session({ peerId, role, onEnd }: Props) {
     setRemoteScreenSize({ width: window.screen.width, height: window.screen.height })
     origScreenRef.current = { width: window.screen.width, height: window.screen.height }
 
-    // Adaptive bitrate: adjust H.264 bitrate based on DC back-pressure every 3s
+    // Adaptive bitrate every 3s — floor 2 Mbps, ceiling 8 Mbps
     const bitrateInterval = setInterval(() => {
       const total = framesSent + framesSkipped
       if (total === 0) return
@@ -223,16 +267,15 @@ export default function Session({ peerId, role, onEnd }: Props) {
       diag(`sent=${framesSent} skip=${framesSkipped} skip%=${Math.round(skipRate * 100)} bps=${mbps}M`)
 
       if (skipRate > 0.05) {
-        // Network can't keep up — reduce bitrate (faster drop on high skip rates)
         const factor = skipRate > 0.5 ? 0.5 : skipRate > 0.2 ? 0.7 : 0.85
-        currentBps = Math.max(800_000, Math.round(currentBps * factor))
+        currentBps = Math.max(2_000_000, Math.round(currentBps * factor))
         invoke('set_capture_bitrate', { bps: currentBps }).catch(() => {})
         stableWindows = 0
         diag(`bitrate ↓ ${(currentBps / 1_000_000).toFixed(1)} Mbps`)
       } else if (skipRate === 0) {
         stableWindows++
-        if (stableWindows >= 3 && currentBps < 6_000_000) {
-          currentBps = Math.min(6_000_000, Math.round(currentBps * 1.15))
+        if (stableWindows >= 2 && currentBps < 8_000_000) {
+          currentBps = Math.min(8_000_000, Math.round(currentBps * 1.2))
           invoke('set_capture_bitrate', { bps: currentBps }).catch(() => {})
           stableWindows = 0
           diag(`bitrate ↑ ${(currentBps / 1_000_000).toFixed(1)} Mbps`)
@@ -245,24 +288,7 @@ export default function Session({ peerId, role, onEnd }: Props) {
     }, 3000)
     agentCleanups.push(() => clearInterval(bitrateInterval))
 
-    // Rust emits H.264 Annex B as base64; decode to binary and forward over DC
-    const frameUnsub = await listen<string>('screen-frame', (e) => {
-      consecutiveErrors = 0
-      if (framesDc.readyState !== 'open') return
-      if (framesDc.bufferedAmount > 262144) { framesSkipped++; return }  // 256 KB back-pressure
-      try {
-        const bin = atob(e.payload)
-        const buf = new Uint8Array(bin.length)
-        for (let i = 0; i < bin.length; i++) buf[i] = bin.charCodeAt(i)
-        framesDc.send(buf.buffer)
-        framesSent++
-      } catch { framesSkipped++ }
-    })
-    agentCleanups.push(frameUnsub)
-
-    // Count Rust capture errors as skipped frames so quality adaptation still works
-    // when the OS screen is unavailable (e.g. right after a resolution change on Windows).
-    // After 30 consecutive errors (~1s) restart capture automatically.
+    // Tauri error events (capture failures) — still use Tauri event since they're rare
     const errUnsub = await listen<string>('screen-frame-error', () => {
       framesSkipped++
       consecutiveErrors++
@@ -270,18 +296,19 @@ export default function Session({ peerId, role, onEnd }: Props) {
     })
     agentCleanups.push(errUnsub)
 
-    agentCleanupRef.current = () => agentCleanups.forEach((f) => f())
+    agentCleanupRef.current = () => {
+      agentCleanups.forEach((f) => f())
+      frameWsRef.current?.close()
+      frameWsRef.current = null
+    }
 
-    await invoke('start_native_capture')
-    diag('native capture started')
+    await connectFrameWs()
 
     let lastW = window.screen.width, lastH = window.screen.height
     screenCheckRef.current = setInterval(() => {
       const w = window.screen.width, h = window.screen.height
       if (w !== lastW || h !== lastH) {
         lastW = w; lastH = h
-        // Resolution changed: restart capture so the new dimensions are picked up,
-        // and reset quality since frame size has changed significantly
         doRestartCapture(`display changed: ${w}x${h}`)
         const d = dcRef.current
         if (d?.readyState === 'open') {
@@ -319,6 +346,8 @@ export default function Session({ peerId, role, onEnd }: Props) {
             if (msg.type === 'screen_info') {
               diag(`screen_info: ${msg.width}x${msg.height}`)
               setRemoteScreenSize({ width: msg.width, height: msg.height })
+            } else if (msg.type === 'monitor_list') {
+              setAgentMonitors(msg.monitors ?? [])
             } else if (msg.type === 'agent_clipboard') {
               navigator.clipboard.writeText(msg.text ?? '').catch(() => {})
               diag(`remote clipboard pulled (${(msg.text ?? '').length} chars)`)
@@ -410,6 +439,14 @@ export default function Session({ peerId, role, onEnd }: Props) {
     setChatInput('')
   }
 
+  function switchMonitor(displayId: number) {
+    setSelectedMonitor(displayId)
+    const dc = dcRef.current
+    if (dc?.readyState === 'open') {
+      dc.send(JSON.stringify({ type: 'switch_monitor', displayId }))
+    }
+  }
+
   function handleMouseMoveOnContainer() {
     setToolbarHidden(false)
     clearTimeout(hideTimerRef.current)
@@ -440,7 +477,6 @@ export default function Session({ peerId, role, onEnd }: Props) {
     }
   }
 
-  // Agent runs in a hidden background window — no UI needed
   if (role === 'agent') {
     return null
   }
@@ -499,6 +535,28 @@ export default function Session({ peerId, role, onEnd }: Props) {
           </ToolBtn>
 
           <div className="w-px h-4 bg-surface-border mx-1" />
+
+          {/* Monitor selector — shown when agent has multiple displays */}
+          {agentMonitors.length > 1 && (
+            <>
+              <span title="Switch remote monitor">
+                <Tv2 size={14} className="text-slate-500" />
+              </span>
+              <select
+                value={selectedMonitor}
+                onChange={(e) => switchMonitor(Number(e.target.value))}
+                title="Switch remote monitor"
+                className="text-xs bg-surface text-slate-300 border border-surface-border rounded px-1.5 py-0.5 cursor-pointer"
+              >
+                {agentMonitors.map((m, i) => (
+                  <option key={m.id} value={m.id}>
+                    {m.isMain ? '★ ' : ''}{m.width}×{m.height}
+                  </option>
+                ))}
+              </select>
+              <div className="w-px h-4 bg-surface-border mx-1" />
+            </>
+          )}
 
           <span
             className="text-xs text-slate-600 font-mono"

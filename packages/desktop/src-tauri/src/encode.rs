@@ -27,7 +27,6 @@ impl H264Encoder {
         self.inner.encode(rgba, self.width, self.height, pts_ms)
     }
 
-    /// Update average bitrate on the running session (no recreation needed).
     pub fn set_bitrate(&mut self, bps: u32) {
         self.inner.set_bitrate(bps);
     }
@@ -65,7 +64,6 @@ mod platform {
         CMTime { value: ms as i64, timescale: 1000, flags: 1, epoch: 0 }
     }
 
-    // kCMTimeIndefinite — flushes all pending frames in CompleteFrames
     const CM_TIME_INDEFINITE: CMTime = CMTime { value: 0, timescale: 0, flags: 0x11, epoch: 0 };
 
     const kCVPixelFormatType_32BGRA: u32 = 0x42475241;
@@ -178,6 +176,7 @@ mod platform {
         static kVTCompressionPropertyKey_RealTime: CFStringRef;
         static kVTCompressionPropertyKey_AllowFrameReordering: CFStringRef;
         static kVTCompressionPropertyKey_MaxKeyFrameInterval: CFStringRef;
+        static kVTCompressionPropertyKey_ExpectedFrameRate: CFStringRef;
         static kVTCompressionPropertyKey_ProfileLevel: CFStringRef;
         static kVTProfileLevel_H264_High_AutoLevel: CFStringRef;
     }
@@ -206,7 +205,6 @@ mod platform {
         if status != 0 || sample_buf.is_null() { return; }
         let ctx = &*(refcon as *mut CallbackCtx);
 
-        // Absent kCMSampleAttachmentKey_NotSync == IS a sync (key) frame
         let is_key = {
             let arr = CMSampleBufferGetSampleAttachmentsArray(sample_buf, false);
             if arr.is_null() || CFArrayGetCount(arr) == 0 {
@@ -284,7 +282,6 @@ mod platform {
         rx: mpsc::Receiver<EncodedFrame>,
     }
 
-    // SAFETY: the VT session is called only from the single capture thread.
     unsafe impl Send for Encoder {}
 
     impl Encoder {
@@ -308,8 +305,9 @@ mod platform {
             if st != 0 || session.is_null() { return None; }
 
             unsafe {
+                // Scale initial bitrate to resolution; floor 2 Mbps, cap 8 Mbps
                 let bps = ((width as i64 * height as i64 * 4_000_000) / (1920 * 1080))
-                    .clamp(500_000, 8_000_000) as i32;
+                    .clamp(2_000_000, 8_000_000) as i32;
 
                 let v = cf_i32(bps);
                 VTSessionSetProperty(session, kVTCompressionPropertyKey_AverageBitRate, v as CFTypeRef);
@@ -318,8 +316,14 @@ mod platform {
                 VTSessionSetProperty(session, kVTCompressionPropertyKey_RealTime, kCFBooleanTrue as CFTypeRef);
                 VTSessionSetProperty(session, kVTCompressionPropertyKey_AllowFrameReordering, kCFBooleanFalse as CFTypeRef);
 
-                let v = cf_i32(60); // IDR every 2 s at 30 fps
+                // IDR every 15 frames (0.5s at 30fps) — fast recovery from packet loss
+                let v = cf_i32(15);
                 VTSessionSetProperty(session, kVTCompressionPropertyKey_MaxKeyFrameInterval, v as CFTypeRef);
+                CFRelease(v as *const c_void);
+
+                // Tell VT the expected frame rate for better rate control
+                let v = cf_i32(30);
+                VTSessionSetProperty(session, kVTCompressionPropertyKey_ExpectedFrameRate, v as CFTypeRef);
                 CFRelease(v as *const c_void);
 
                 VTSessionSetProperty(
@@ -362,7 +366,6 @@ mod platform {
                 )
             };
             if cv_st != 0 || pixel_buf.is_null() {
-                // Free manually — CV won't call our callback
                 unsafe { drop(Box::from_raw(release_ref as *mut Vec<u8>)); }
                 return None;
             }
@@ -384,14 +387,13 @@ mod platform {
 
             if enc_st != 0 { return None; }
 
-            // Block until the callback fires for this frame
             unsafe { VTCompressionSessionCompleteFrames(self.session, CM_TIME_INDEFINITE); }
 
             self.rx.try_recv().ok()
         }
 
         pub fn set_bitrate(&mut self, bps: u32) {
-            let v = cf_i32(bps.clamp(500_000, 8_000_000) as i32);
+            let v = cf_i32(bps.clamp(2_000_000, 8_000_000) as i32);
             unsafe {
                 VTSessionSetProperty(self.session, kVTCompressionPropertyKey_AverageBitRate, v as *const c_void);
                 CFRelease(v as *const c_void);
@@ -436,7 +438,7 @@ mod platform {
     impl Encoder {
         pub fn new(width: u32, height: u32) -> Option<Self> {
             let bps = ((width as u64 * height as u64 * 4_000_000) / (1920 * 1080))
-                .clamp(500_000, 8_000_000) as u32;
+                .clamp(2_000_000, 8_000_000) as u32;
             let enc = make_encoder(width, height, bps)?;
             Some(Self { enc, width, height, current_bps: bps })
         }
@@ -458,7 +460,7 @@ mod platform {
         }
 
         pub fn set_bitrate(&mut self, bps: u32) {
-            let clamped = bps.clamp(500_000, 8_000_000);
+            let clamped = bps.clamp(2_000_000, 8_000_000);
             if clamped == self.current_bps { return; }
             if let Some(enc) = make_encoder(self.width, self.height, clamped) {
                 self.enc = enc;

@@ -34,6 +34,10 @@ export default function RemoteDisplay({ framesChannel, dataChannel, remoteScreen
     let decodedMs = 0 // rolling avg decode time (recv→draw)
 
     // Resize canvas to match decoded frame on first frame / resolution change
+    // avc1.640033 = H.264 High Profile Level 5.1 — accepts any H.264 High output
+    // VideoToolbox uses AutoLevel so we must allow up to 5.1 here
+    const H264_CODEC = 'avc1.640033'
+
     const decoder = new VideoDecoder({
       output: (frame) => {
         const drawStart = performance.now()
@@ -43,7 +47,6 @@ export default function RemoteDisplay({ framesChannel, dataChannel, remoteScreen
         }
         ctx.drawImage(frame, 0, 0)
         frame.close()
-        // Rolling avg of render latency
         decodedMs = decodedMs * 0.9 + (performance.now() - drawStart) * 0.1
         frameCount++
         const now = performance.now()
@@ -61,13 +64,13 @@ export default function RemoteDisplay({ framesChannel, dataChannel, remoteScreen
         console.warn('[VideoDecoder] error — resetting:', err)
         try {
           decoder.reset()
-          decoder.configure({ codec: 'avc1.640028', optimizeForLatency: true })
+          decoder.configure({ codec: H264_CODEC, optimizeForLatency: true })
         } catch {}
       },
     })
 
     try {
-      decoder.configure({ codec: 'avc1.640028', optimizeForLatency: true })
+      decoder.configure({ codec: H264_CODEC, optimizeForLatency: true })
     } catch (err) {
       console.error('[VideoDecoder] configure failed:', err)
       return

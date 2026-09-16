@@ -1,12 +1,12 @@
-// Screen capture abstraction.
+// Screen capture abstraction with multi-monitor support.
 //
-// macOS: CGDisplayCreateImage via CoreGraphics (non-deprecated, lower latency
-//        than the screenshots crate's CGWindowListCreateImage path).
-//        Returns native pixel resolution — Retina displays return 2x data.
+// macOS: CGDisplayCreateImage via CoreGraphics with sRGB output (color-accurate).
+// Windows / other: screenshots crate.
 //
-// Windows / other: screenshots crate (DXGI / GDI path).
-//
-// Public API: capture_screen() -> Option<RgbaFrame>
+// Public API:
+//   list_displays() -> Vec<DisplayInfo>
+//   capture_screen_at(display_id: u32) -> Option<RgbaFrame>
+//     display_id 0 = primary / main display
 
 pub struct RgbaFrame {
     pub data: Vec<u8>,  // RGBA8, row-major, width*height*4 bytes
@@ -14,17 +14,24 @@ pub struct RgbaFrame {
     pub height: u32,
 }
 
+pub struct DisplayInfo {
+    pub id: u32,
+    pub width: u32,
+    pub height: u32,
+    pub is_main: bool,
+}
+
 #[cfg(target_os = "macos")]
-pub use macos::capture_screen;
+pub use macos::{list_displays, capture_screen_at};
 
 #[cfg(not(target_os = "macos"))]
-pub use fallback::capture_screen;
+pub use fallback::{list_displays, capture_screen_at};
 
 // ── macOS ─────────────────────────────────────────────────────────────────────
 
 #[cfg(target_os = "macos")]
 mod macos {
-    use super::RgbaFrame;
+    use super::{DisplayInfo, RgbaFrame};
     use std::ffi::c_void;
 
     #[repr(C)]
@@ -39,19 +46,18 @@ mod macos {
     #[derive(Clone, Copy)]
     struct CGRect { origin: CGPoint, size: CGSize }
 
-    // kCGImageAlphaNoneSkipLast (5) — RGBX, 4 bytes/pixel, alpha slot forced to 0
-    // kCGBitmapByteOrderDefault (0) — native byte order, no swap
-    // Combined: gives R,G,B,0 in memory — safe to pass to VideoToolbox after swap(0,2)
-    const BITMAP_INFO: u32 = 5;
+    // kCGBitmapByteOrder32Big | kCGImageAlphaNoneSkipLast = 2 | 4 = 6 → RGBX in memory (sRGB)
+    // Using kCGImageAlphaNoneSkipLast (4) alone = RGBX big-endian = R,G,B,X
+    const BITMAP_INFO: u32 = 4;
 
     #[link(name = "CoreGraphics", kind = "framework")]
     extern "C" {
         fn CGMainDisplayID() -> u32;
-        fn CGDisplayCreateImage(displayID: u32) -> *mut c_void; // CGImageRef
+        fn CGDisplayCreateImage(displayID: u32) -> *mut c_void;
         fn CGImageRelease(image: *mut c_void);
         fn CGImageGetWidth(image: *mut c_void) -> usize;
         fn CGImageGetHeight(image: *mut c_void) -> usize;
-        fn CGColorSpaceCreateDeviceRGB() -> *mut c_void;
+        fn CGColorSpaceCreateWithName(name: *const c_void) -> *mut c_void;
         fn CGColorSpaceRelease(cs: *mut c_void);
         fn CGBitmapContextCreate(
             data: *mut c_void,
@@ -60,14 +66,47 @@ mod macos {
             bytesPerRow: usize,
             space: *mut c_void,
             bitmapInfo: u32,
-        ) -> *mut c_void; // CGContextRef
+        ) -> *mut c_void;
         fn CGContextRelease(ctx: *mut c_void);
         fn CGContextDrawImage(ctx: *mut c_void, rect: CGRect, image: *mut c_void);
+        fn CGGetActiveDisplayList(
+            maxDisplays: u32,
+            activeDisplays: *mut u32,
+            displayCount: *mut u32,
+        ) -> i32;
+        fn CGDisplayBounds(displayID: u32) -> CGRect;
+
+        // sRGB color space name constant — ensures accurate colors regardless of display profile
+        static kCGColorSpaceSRGB: *const c_void;
     }
 
-    pub fn capture_screen() -> Option<RgbaFrame> {
+    pub fn list_displays() -> Vec<DisplayInfo> {
         unsafe {
-            let display = CGMainDisplayID();
+            let mut ids = [0u32; 32];
+            let mut count = 0u32;
+            CGGetActiveDisplayList(32, ids.as_mut_ptr(), &mut count);
+            let main = CGMainDisplayID();
+            (0..count as usize).map(|i| {
+                let id = ids[i];
+                let bounds = CGDisplayBounds(id);
+                DisplayInfo {
+                    id,
+                    width: bounds.size.width as u32,
+                    height: bounds.size.height as u32,
+                    is_main: id == main,
+                }
+            }).collect()
+        }
+    }
+
+    pub fn capture_screen_at(display_id: u32) -> Option<RgbaFrame> {
+        unsafe {
+            let display = if display_id == 0 {
+                CGMainDisplayID()
+            } else {
+                display_id
+            };
+
             let cg_image = CGDisplayCreateImage(display);
             if cg_image.is_null() { return None; }
 
@@ -79,7 +118,9 @@ mod macos {
             }
 
             let mut rgba = vec![0u8; w * h * 4];
-            let cs = CGColorSpaceCreateDeviceRGB();
+
+            // Use sRGB color space for accurate, consistent colors across all display types
+            let cs = CGColorSpaceCreateWithName(kCGColorSpaceSRGB);
             let ctx = CGBitmapContextCreate(
                 rgba.as_mut_ptr() as *mut c_void,
                 w, h, 8, w * 4, cs, BITMAP_INFO,
@@ -108,15 +149,33 @@ mod macos {
 
 #[cfg(not(target_os = "macos"))]
 mod fallback {
-    use super::RgbaFrame;
+    use super::{DisplayInfo, RgbaFrame};
     use screenshots::Screen;
 
-    pub fn capture_screen() -> Option<RgbaFrame> {
+    pub fn list_displays() -> Vec<DisplayInfo> {
+        Screen::all().unwrap_or_default()
+            .into_iter()
+            .map(|s| DisplayInfo {
+                id: s.display_info.id,
+                width: s.display_info.width,
+                height: s.display_info.height,
+                is_main: s.display_info.is_primary,
+            })
+            .collect()
+    }
+
+    pub fn capture_screen_at(display_id: u32) -> Option<RgbaFrame> {
         let screens = Screen::all().ok()?;
-        let screen = screens.into_iter().next()?;
+        let screen = if display_id == 0 {
+            screens.into_iter().find(|s| s.display_info.is_primary)
+                .or_else(|| Screen::all().ok()?.into_iter().next())?
+        } else {
+            screens.into_iter().find(|s| s.display_info.id == display_id)
+                .or_else(|| Screen::all().ok()?.into_iter().find(|s| s.display_info.is_primary))?
+        };
         let img = screen.capture().ok()?;
-        let width = img.width();
-        let height = img.height();
-        Some(RgbaFrame { data: img.into_raw(), width, height })
+        let w = img.width();
+        let h = img.height();
+        Some(RgbaFrame { data: img.into_raw(), width: w, height: h })
     }
 }
