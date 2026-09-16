@@ -1,0 +1,833 @@
+'use client';
+
+import {
+  useRef,
+  useState,
+  useEffect,
+  useCallback,
+  type FormEvent,
+  type KeyboardEvent as ReactKeyboardEvent,
+} from 'react';
+import { useSearchParams } from 'next/navigation';
+import {
+  Monitor,
+  Maximize2,
+  Minimize2,
+  Unplug,
+  Loader2,
+  AlertTriangle,
+  RefreshCw,
+  Wifi,
+  WifiOff,
+  Lock,
+  Tv2,
+} from 'lucide-react';
+import clsx from 'clsx';
+
+// ---------------------------------------------------------------------------
+// Constants
+// ---------------------------------------------------------------------------
+
+const WS_URL =
+  typeof window !== 'undefined'
+    ? (process.env.NEXT_PUBLIC_WS_URL ?? 'wss://signal.doomsdesk.io')
+    : 'wss://signal.doomsdesk.io';
+
+const ICE_SERVERS: RTCIceServer[] = [
+  { urls: 'stun:stun.l.google.com:19302' },
+  { urls: 'stun:stun1.l.google.com:19302' },
+];
+
+// How long without frames before we show the "frozen" overlay (ms)
+const FREEZE_TIMEOUT_MS = 5000;
+
+// ---------------------------------------------------------------------------
+// Types
+// ---------------------------------------------------------------------------
+
+type ViewerState = 'idle' | 'connecting' | 'connected' | 'failed' | 'disconnected';
+
+interface Stats {
+  fps: number;
+  codec: string;
+}
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+function randomId(len = 8): string {
+  return Math.random().toString(36).slice(2, 2 + len);
+}
+
+/** Detect codec from the first NAL unit byte of an Annex-B frame. */
+function detectCodec(data: Uint8Array): 'h264' | 'h265' | null {
+  // Find start code 0x00000001
+  let offset = 0;
+  if (
+    data[0] === 0x00 &&
+    data[1] === 0x00 &&
+    data[2] === 0x00 &&
+    data[3] === 0x01
+  ) {
+    offset = 4;
+  } else if (data[0] === 0x00 && data[1] === 0x00 && data[2] === 0x01) {
+    offset = 3;
+  }
+  if (offset === 0) return null;
+  const nalType = data[offset] & 0x1f; // H.264 NAL unit type (5 bits)
+  const h265NalType = (data[offset] >> 1) & 0x3f; // H.265 NAL unit type (6 bits)
+  // H.265 VPS/SPS/PPS start codes: 32,33,34
+  if (h265NalType >= 32 && h265NalType <= 34) return 'h265';
+  // H.264 IDR / SPS / PPS: 5, 7, 8
+  if (nalType === 5 || nalType === 7 || nalType === 8) return 'h264';
+  // Heuristic: if high-order bit is 0 it's likely H.264
+  if ((data[offset] & 0x80) === 0) return 'h264';
+  return 'h265';
+}
+
+// ---------------------------------------------------------------------------
+// Main component
+// ---------------------------------------------------------------------------
+
+export default function ViewerPage() {
+  const searchParams = useSearchParams();
+
+  // Form state
+  const [deviceId, setDeviceId] = useState(searchParams.get('id') ?? '');
+  const [password, setPassword] = useState(searchParams.get('pw') ?? '');
+
+  // Viewer lifecycle state
+  const [viewerState, setViewerState] = useState<ViewerState>('idle');
+  const [statusMsg, setStatusMsg] = useState('');
+  const [errorMsg, setErrorMsg] = useState('');
+  const [stats, setStats] = useState<Stats>({ fps: 0, codec: '' });
+  const [frozen, setFrozen] = useState(false);
+  const [isFullscreen, setIsFullscreen] = useState(false);
+
+  // WebRTC / WS refs
+  const wsRef = useRef<WebSocket | null>(null);
+  const pcRef = useRef<RTCPeerConnection | null>(null);
+  const inputDcRef = useRef<RTCDataChannel | null>(null);
+  const decoderRef = useRef<VideoDecoder | null>(null);
+  const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  const containerRef = useRef<HTMLDivElement | null>(null);
+
+  // Internals
+  const myIdRef = useRef<string>('');
+  const frameCountRef = useRef(0);
+  const lastFrameTsRef = useRef(0);
+  const freezeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const fpsIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const detectedCodecRef = useRef<string>('');
+
+  // ---------------------------------------------------------------------------
+  // Cleanup
+  // ---------------------------------------------------------------------------
+
+  const cleanup = useCallback(() => {
+    if (wsRef.current) {
+      wsRef.current.onclose = null;
+      wsRef.current.onmessage = null;
+      wsRef.current.onerror = null;
+      wsRef.current.close();
+      wsRef.current = null;
+    }
+    if (pcRef.current) {
+      pcRef.current.onicecandidate = null;
+      pcRef.current.ondatachannel = null;
+      pcRef.current.onconnectionstatechange = null;
+      pcRef.current.close();
+      pcRef.current = null;
+    }
+    if (decoderRef.current) {
+      try { decoderRef.current.close(); } catch { /* already closed */ }
+      decoderRef.current = null;
+    }
+    if (freezeTimerRef.current) clearTimeout(freezeTimerRef.current);
+    if (fpsIntervalRef.current) clearInterval(fpsIntervalRef.current);
+    inputDcRef.current = null;
+    frameCountRef.current = 0;
+    lastFrameTsRef.current = 0;
+    detectedCodecRef.current = '';
+    setFrozen(false);
+    setStats({ fps: 0, codec: '' });
+  }, []);
+
+  // ---------------------------------------------------------------------------
+  // FPS tracking
+  // ---------------------------------------------------------------------------
+
+  function startFpsTracker() {
+    if (fpsIntervalRef.current) clearInterval(fpsIntervalRef.current);
+    fpsIntervalRef.current = setInterval(() => {
+      const fps = frameCountRef.current;
+      frameCountRef.current = 0;
+      setStats((prev) => ({ ...prev, fps }));
+    }, 1000);
+  }
+
+  // ---------------------------------------------------------------------------
+  // Freeze detection
+  // ---------------------------------------------------------------------------
+
+  function resetFreezeTimer() {
+    setFrozen(false);
+    if (freezeTimerRef.current) clearTimeout(freezeTimerRef.current);
+    freezeTimerRef.current = setTimeout(() => setFrozen(true), FREEZE_TIMEOUT_MS);
+  }
+
+  // ---------------------------------------------------------------------------
+  // VideoDecoder
+  // ---------------------------------------------------------------------------
+
+  function initDecoder(codec: 'h264' | 'h265') {
+    if (decoderRef.current) {
+      try { decoderRef.current.close(); } catch { /* ok */ }
+    }
+
+    const codecStr = codec === 'h264' ? 'avc1.640033' : 'hvc1.1.6.L153.B0';
+    detectedCodecRef.current = codec === 'h264' ? 'H.264' : 'H.265';
+    setStats((prev) => ({ ...prev, codec: detectedCodecRef.current }));
+
+    const decoder = new VideoDecoder({
+      output(frame) {
+        frameCountRef.current += 1;
+        lastFrameTsRef.current = Date.now();
+        resetFreezeTimer();
+
+        const canvas = canvasRef.current;
+        if (!canvas) { frame.close(); return; }
+        if (canvas.width !== frame.displayWidth || canvas.height !== frame.displayHeight) {
+          canvas.width = frame.displayWidth;
+          canvas.height = frame.displayHeight;
+        }
+        const ctx = canvas.getContext('2d');
+        if (ctx) ctx.drawImage(frame as unknown as CanvasImageSource, 0, 0);
+        frame.close();
+      },
+      error(e) {
+        console.error('[Decoder]', e);
+      },
+    });
+
+    decoder.configure({
+      codec: codecStr,
+      optimizeForLatency: true,
+    });
+
+    decoderRef.current = decoder;
+  }
+
+  // ---------------------------------------------------------------------------
+  // Frame handler (from DataChannel)
+  // ---------------------------------------------------------------------------
+
+  function handleFrame(data: ArrayBuffer) {
+    const bytes = new Uint8Array(data);
+
+    // Auto-detect codec on first frame
+    if (!detectedCodecRef.current) {
+      const detected = detectCodec(bytes);
+      if (detected) initDecoder(detected);
+    }
+
+    if (!decoderRef.current) return;
+
+    try {
+      const chunk = new EncodedVideoChunk({
+        type: 'key', // treat all as key — agent sends IDR on reconnect anyway
+        timestamp: performance.now() * 1000,
+        data: bytes,
+      });
+      decoderRef.current.decode(chunk);
+    } catch (e) {
+      console.warn('[Frame decode error]', e);
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // DataChannel setup
+  // ---------------------------------------------------------------------------
+
+  function setupDataChannel(dc: RTCDataChannel) {
+    if (dc.label === 'input') {
+      inputDcRef.current = dc;
+      dc.onopen = () => console.log('[DC:input] open');
+    }
+
+    if (dc.label === 'frames') {
+      dc.binaryType = 'arraybuffer';
+      dc.onopen = () => {
+        console.log('[DC:frames] open');
+        setViewerState('connected');
+        startFpsTracker();
+        resetFreezeTimer();
+      };
+      dc.onmessage = (ev) => {
+        if (ev.data instanceof ArrayBuffer) {
+          handleFrame(ev.data);
+        } else if (typeof ev.data === 'string') {
+          // JSON stats / chat from agent
+          try {
+            const msg = JSON.parse(ev.data as string);
+            if (msg.type === 'stats') {
+              setStats((prev) => ({
+                fps: prev.fps,
+                codec: msg.codec ?? prev.codec,
+              }));
+            }
+          } catch { /* ignore */ }
+        }
+      };
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // WebRTC setup
+  // ---------------------------------------------------------------------------
+
+  function createPeerConnection() {
+    const pc = new RTCPeerConnection({ iceServers: ICE_SERVERS });
+
+    pc.onicecandidate = (ev) => {
+      if (ev.candidate && wsRef.current?.readyState === WebSocket.OPEN) {
+        wsRef.current.send(
+          JSON.stringify({
+            type: 'ice',
+            targetId: deviceId,
+            candidate: ev.candidate,
+          })
+        );
+      }
+    };
+
+    pc.ondatachannel = (ev) => {
+      setupDataChannel(ev.channel);
+    };
+
+    pc.onconnectionstatechange = () => {
+      console.log('[PC] state:', pc.connectionState);
+      if (pc.connectionState === 'disconnected' || pc.connectionState === 'failed') {
+        setViewerState('disconnected');
+        cleanup();
+      }
+    };
+
+    pcRef.current = pc;
+    return pc;
+  }
+
+  // ---------------------------------------------------------------------------
+  // WebSocket signaling
+  // ---------------------------------------------------------------------------
+
+  function connect() {
+    if (!deviceId.trim() || !password.trim()) return;
+
+    cleanup();
+    setViewerState('connecting');
+    setStatusMsg('Connecting to signaling server…');
+    setErrorMsg('');
+
+    const myId = `web-${randomId()}`;
+    myIdRef.current = myId;
+
+    let ws: WebSocket;
+    try {
+      ws = new WebSocket(WS_URL);
+    } catch {
+      setViewerState('failed');
+      setErrorMsg('Could not open WebSocket. Check your network.');
+      return;
+    }
+
+    ws.binaryType = 'arraybuffer';
+    wsRef.current = ws;
+
+    ws.onopen = () => {
+      setStatusMsg('Registering controller…');
+      ws.send(
+        JSON.stringify({
+          type: 'register',
+          deviceId: myId,
+          randomPassword: '',
+          permanentPassword: null,
+        })
+      );
+    };
+
+    ws.onmessage = async (ev) => {
+      let msg: Record<string, unknown>;
+      try {
+        msg = JSON.parse(ev.data as string) as Record<string, unknown>;
+      } catch {
+        return;
+      }
+
+      switch (msg.type) {
+        case 'registered': {
+          setStatusMsg(`Connecting to device ${deviceId}…`);
+          ws.send(
+            JSON.stringify({
+              type: 'connect',
+              targetId: deviceId,
+              password: password,
+            })
+          );
+          break;
+        }
+
+        case 'connect_result': {
+          if (msg.success) {
+            setStatusMsg('Waiting for WebRTC offer…');
+            createPeerConnection();
+          } else {
+            setViewerState('failed');
+            setErrorMsg(
+              typeof msg.reason === 'string' ? msg.reason : 'Connection rejected. Check device ID and password.'
+            );
+          }
+          break;
+        }
+
+        case 'offer': {
+          const pc = pcRef.current ?? createPeerConnection();
+          try {
+            await pc.setRemoteDescription(
+              new RTCSessionDescription(msg.sdp as RTCSessionDescriptionInit)
+            );
+            const answer = await pc.createAnswer();
+            await pc.setLocalDescription(answer);
+            ws.send(
+              JSON.stringify({
+                type: 'answer',
+                targetId: msg.from ?? deviceId,
+                sdp: pc.localDescription,
+              })
+            );
+            setStatusMsg('Establishing encrypted tunnel…');
+          } catch (e) {
+            console.error('[SDP]', e);
+            setViewerState('failed');
+            setErrorMsg('WebRTC negotiation failed.');
+          }
+          break;
+        }
+
+        case 'ice': {
+          const pc = pcRef.current;
+          if (pc && msg.candidate) {
+            try {
+              await pc.addIceCandidate(new RTCIceCandidate(msg.candidate as RTCIceCandidateInit));
+            } catch { /* race — ok */ }
+          }
+          break;
+        }
+
+        case 'peer_disconnected': {
+          setViewerState('disconnected');
+          setErrorMsg('The remote device disconnected.');
+          cleanup();
+          break;
+        }
+
+        case 'error': {
+          setViewerState('failed');
+          setErrorMsg(typeof msg.message === 'string' ? msg.message : 'Signaling error.');
+          cleanup();
+          break;
+        }
+
+        default:
+          break;
+      }
+    };
+
+    ws.onerror = () => {
+      setViewerState('failed');
+      setErrorMsg('WebSocket error. Server may be unreachable.');
+    };
+
+    ws.onclose = () => {
+      if (viewerState === 'connected') {
+        setViewerState('disconnected');
+        setErrorMsg('Connection to signaling server lost.');
+      }
+    };
+  }
+
+  // ---------------------------------------------------------------------------
+  // Disconnect
+  // ---------------------------------------------------------------------------
+
+  function disconnect() {
+    cleanup();
+    setViewerState('idle');
+    setStatusMsg('');
+    setErrorMsg('');
+  }
+
+  // ---------------------------------------------------------------------------
+  // Input forwarding
+  // ---------------------------------------------------------------------------
+
+  function sendInput(payload: Record<string, unknown>) {
+    const dc = inputDcRef.current;
+    if (dc?.readyState === 'open') {
+      dc.send(JSON.stringify(payload));
+    }
+  }
+
+  function onCanvasMouseMove(e: React.MouseEvent<HTMLCanvasElement>) {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const rect = canvas.getBoundingClientRect();
+    sendInput({
+      type: 'mousemove',
+      x: (e.clientX - rect.left) / rect.width,
+      y: (e.clientY - rect.top) / rect.height,
+    });
+  }
+
+  function onCanvasMouseDown(e: React.MouseEvent<HTMLCanvasElement>) {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const rect = canvas.getBoundingClientRect();
+    sendInput({
+      type: 'mousedown',
+      button: e.button,
+      x: (e.clientX - rect.left) / rect.width,
+      y: (e.clientY - rect.top) / rect.height,
+    });
+  }
+
+  function onCanvasMouseUp(e: React.MouseEvent<HTMLCanvasElement>) {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const rect = canvas.getBoundingClientRect();
+    sendInput({
+      type: 'mouseup',
+      button: e.button,
+      x: (e.clientX - rect.left) / rect.width,
+      y: (e.clientY - rect.top) / rect.height,
+    });
+  }
+
+  function onCanvasWheel(e: React.WheelEvent<HTMLCanvasElement>) {
+    sendInput({ type: 'wheel', deltaX: e.deltaX, deltaY: e.deltaY });
+  }
+
+  function onCanvasKeyDown(e: ReactKeyboardEvent<HTMLCanvasElement>) {
+    e.preventDefault();
+    sendInput({ type: 'keydown', key: e.key, code: e.code });
+  }
+
+  function onCanvasKeyUp(e: ReactKeyboardEvent<HTMLCanvasElement>) {
+    e.preventDefault();
+    sendInput({ type: 'keyup', key: e.key, code: e.code });
+  }
+
+  // ---------------------------------------------------------------------------
+  // Fullscreen
+  // ---------------------------------------------------------------------------
+
+  function toggleFullscreen() {
+    const el = containerRef.current;
+    if (!el) return;
+    if (!document.fullscreenElement) {
+      el.requestFullscreen().catch(() => {});
+    } else {
+      document.exitFullscreen().catch(() => {});
+    }
+  }
+
+  useEffect(() => {
+    function onFullscreenChange() {
+      setIsFullscreen(!!document.fullscreenElement);
+    }
+    document.addEventListener('fullscreenchange', onFullscreenChange);
+    return () => document.removeEventListener('fullscreenchange', onFullscreenChange);
+  }, []);
+
+  // ---------------------------------------------------------------------------
+  // Cleanup on unmount
+  // ---------------------------------------------------------------------------
+
+  useEffect(() => {
+    return () => { cleanup(); };
+  }, [cleanup]);
+
+  // ---------------------------------------------------------------------------
+  // Render helpers
+  // ---------------------------------------------------------------------------
+
+  function handleFormSubmit(e: FormEvent) {
+    e.preventDefault();
+    connect();
+  }
+
+  // ---------------------------------------------------------------------------
+  // UI
+  // ---------------------------------------------------------------------------
+
+  const isIdle = viewerState === 'idle';
+  const isConnecting = viewerState === 'connecting';
+  const isConnected = viewerState === 'connected';
+  const isFailed = viewerState === 'failed';
+  const isDisconnected = viewerState === 'disconnected';
+
+  return (
+    // NOTE: This page is in the (dashboard) group which enforces auth via layout.tsx.
+    // If you want unauthenticated access, move this page to a top-level public route.
+    <div className="space-y-0 animate-fade-in h-full">
+      {/* Page header — only shown when not connected */}
+      {!isConnected && (
+        <div className="mb-6">
+          <div className="flex items-center gap-3 mb-1">
+            <div className="w-9 h-9 rounded-xl bg-accent/15 flex items-center justify-center">
+              <Tv2 size={18} className="text-accent" />
+            </div>
+            <div>
+              <h1 className="text-2xl font-bold text-dark-text">Remote Viewer</h1>
+              <p className="text-sm text-dark-muted">Control any device from your browser — no install required</p>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ------------------------------------------------------------------ */}
+      {/* IDLE: Connect Form                                                  */}
+      {/* ------------------------------------------------------------------ */}
+      {isIdle && (
+        <div className="flex justify-center pt-4">
+          <div className="w-full max-w-md">
+            <div className="bg-dark-surface border border-dark-border rounded-2xl p-8 shadow-2xl">
+              <div className="flex items-center gap-3 mb-6">
+                <div className="w-10 h-10 rounded-xl bg-accent/10 border border-accent/20 flex items-center justify-center">
+                  <Monitor size={20} className="text-accent" />
+                </div>
+                <div>
+                  <h2 className="text-base font-bold text-dark-text">Connect to Device</h2>
+                  <p className="text-xs text-dark-muted">Enter the device credentials to start a session</p>
+                </div>
+              </div>
+
+              <form onSubmit={handleFormSubmit} className="space-y-4">
+                <div>
+                  <label className="block text-xs font-semibold text-dark-muted uppercase tracking-wider mb-1.5">
+                    Device ID
+                  </label>
+                  <input
+                    type="text"
+                    value={deviceId}
+                    onChange={(e) => setDeviceId(e.target.value)}
+                    placeholder="e.g. ABCD-1234"
+                    required
+                    autoFocus
+                    className="input-base font-mono"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-xs font-semibold text-dark-muted uppercase tracking-wider mb-1.5">
+                    Password
+                  </label>
+                  <div className="relative">
+                    <input
+                      type="password"
+                      value={password}
+                      onChange={(e) => setPassword(e.target.value)}
+                      placeholder="Session or permanent password"
+                      required
+                      className="input-base pr-9"
+                    />
+                    <Lock size={14} className="absolute right-3 top-1/2 -translate-y-1/2 text-dark-muted/50 pointer-events-none" />
+                  </div>
+                </div>
+
+                <button
+                  type="submit"
+                  disabled={!deviceId.trim() || !password.trim()}
+                  className="btn-primary w-full flex items-center justify-center gap-2 mt-2"
+                >
+                  <Wifi size={15} />
+                  Connect
+                </button>
+              </form>
+
+              <p className="text-center text-xs text-dark-muted/50 mt-5">
+                End-to-end encrypted via WebRTC. Password never leaves your browser.
+              </p>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ------------------------------------------------------------------ */}
+      {/* CONNECTING: Spinner + status                                        */}
+      {/* ------------------------------------------------------------------ */}
+      {isConnecting && (
+        <div className="flex flex-col items-center justify-center py-28 gap-5">
+          <div className="relative">
+            <div className="w-16 h-16 rounded-2xl bg-accent/10 border border-accent/20 flex items-center justify-center">
+              <Monitor size={28} className="text-accent" />
+            </div>
+            <Loader2
+              size={60}
+              className="text-accent/40 animate-spin absolute -inset-1"
+              strokeWidth={1}
+            />
+          </div>
+          <div className="text-center">
+            <p className="text-sm font-semibold text-dark-text">{statusMsg}</p>
+            <p className="text-xs text-dark-muted mt-1">Connecting to <span className="font-mono text-accent">{deviceId}</span></p>
+          </div>
+          <button
+            onClick={disconnect}
+            className="btn-secondary flex items-center gap-2 text-xs mt-2"
+          >
+            <WifiOff size={13} />
+            Cancel
+          </button>
+        </div>
+      )}
+
+      {/* ------------------------------------------------------------------ */}
+      {/* CONNECTED: Canvas + Toolbar                                         */}
+      {/* ------------------------------------------------------------------ */}
+      {isConnected && (
+        <div
+          ref={containerRef}
+          className="fixed inset-0 flex flex-col bg-black z-40"
+        >
+          {/* Toolbar */}
+          <div className={clsx(
+            'flex-shrink-0 h-10 flex items-center justify-between px-4 gap-4',
+            'bg-dark-surface/95 border-b border-dark-border/60 backdrop-blur-sm',
+          )}>
+            {/* Left: device + codec */}
+            <div className="flex items-center gap-3">
+              <div className="flex items-center gap-2">
+                <div className="w-2 h-2 rounded-full bg-success animate-pulse" />
+                <span className="text-xs font-medium text-dark-text font-mono">{deviceId}</span>
+              </div>
+              {stats.codec && (
+                <span className="text-[10px] font-medium px-1.5 py-0.5 rounded bg-accent/10 text-accent border border-accent/20">
+                  {stats.codec}
+                </span>
+              )}
+            </div>
+
+            {/* Center: FPS */}
+            <div className="flex items-center gap-1.5">
+              <span className="text-xs text-dark-muted">FPS</span>
+              <span className={clsx(
+                'text-xs font-bold font-mono tabular-nums',
+                stats.fps >= 30 ? 'text-success' : stats.fps >= 15 ? 'text-warning' : 'text-danger'
+              )}>
+                {stats.fps}
+              </span>
+            </div>
+
+            {/* Right: controls */}
+            <div className="flex items-center gap-1">
+              <button
+                onClick={toggleFullscreen}
+                title={isFullscreen ? 'Exit fullscreen' : 'Fullscreen'}
+                className="p-1.5 rounded-lg text-dark-muted hover:text-dark-text hover:bg-dark-border/40 transition-colors"
+              >
+                {isFullscreen ? <Minimize2 size={14} /> : <Maximize2 size={14} />}
+              </button>
+              <button
+                onClick={disconnect}
+                title="Disconnect"
+                className="flex items-center gap-1.5 px-3 py-1 rounded-lg text-xs font-medium text-danger hover:bg-danger/10 border border-transparent hover:border-danger/20 transition-all"
+              >
+                <Unplug size={13} />
+                Disconnect
+              </button>
+            </div>
+          </div>
+
+          {/* Canvas area */}
+          <div className="relative flex-1 flex items-center justify-center bg-black overflow-hidden">
+            <canvas
+              ref={canvasRef}
+              className="max-w-full max-h-full object-contain cursor-crosshair outline-none"
+              tabIndex={0}
+              onMouseMove={onCanvasMouseMove}
+              onMouseDown={onCanvasMouseDown}
+              onMouseUp={onCanvasMouseUp}
+              onWheel={onCanvasWheel}
+              onKeyDown={onCanvasKeyDown}
+              onKeyUp={onCanvasKeyUp}
+              onContextMenu={(e) => e.preventDefault()}
+            />
+
+            {/* Frozen overlay */}
+            {frozen && (
+              <div className="absolute inset-0 flex flex-col items-center justify-center gap-4 bg-black/70 backdrop-blur-sm animate-fade-in">
+                <AlertTriangle size={36} className="text-warning" />
+                <div className="text-center">
+                  <p className="text-sm font-semibold text-dark-text">Display frozen</p>
+                  <p className="text-xs text-dark-muted mt-1">No frames received for {FREEZE_TIMEOUT_MS / 1000}s</p>
+                </div>
+                <button
+                  onClick={() => { disconnect(); setTimeout(connect, 100); }}
+                  className="btn-secondary flex items-center gap-2 text-xs"
+                >
+                  <RefreshCw size={13} />
+                  Reconnect
+                </button>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* ------------------------------------------------------------------ */}
+      {/* FAILED / DISCONNECTED: Error + retry                               */}
+      {/* ------------------------------------------------------------------ */}
+      {(isFailed || isDisconnected) && (
+        <div className="flex justify-center pt-4">
+          <div className="w-full max-w-md">
+            <div className="bg-dark-surface border border-dark-border rounded-2xl p-8 shadow-2xl text-center">
+              <div className="w-14 h-14 rounded-2xl bg-danger/10 border border-danger/20 flex items-center justify-center mx-auto mb-4">
+                {isFailed ? (
+                  <AlertTriangle size={24} className="text-danger" />
+                ) : (
+                  <WifiOff size={24} className="text-danger" />
+                )}
+              </div>
+
+              <h2 className="text-base font-bold text-dark-text mb-1">
+                {isFailed ? 'Connection Failed' : 'Disconnected'}
+              </h2>
+              <p className="text-sm text-dark-muted mb-1">
+                {errorMsg || (isDisconnected ? 'The session ended.' : 'Something went wrong.')}
+              </p>
+              <p className="text-xs text-dark-muted/60 font-mono mb-6">{deviceId}</p>
+
+              <div className="flex flex-col gap-2">
+                <button
+                  onClick={connect}
+                  className="btn-primary w-full flex items-center justify-center gap-2"
+                >
+                  <RefreshCw size={14} />
+                  Try Again
+                </button>
+                <button
+                  onClick={() => { setViewerState('idle'); setErrorMsg(''); }}
+                  className="btn-secondary w-full"
+                >
+                  Change Device
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}

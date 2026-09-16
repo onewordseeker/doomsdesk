@@ -5,6 +5,7 @@ import { usePathname, useRouter } from 'next/navigation';
 import {
   LayoutDashboard,
   Monitor,
+  Tv2,
   Clock,
   CreditCard,
   Settings,
@@ -13,6 +14,7 @@ import {
   ChevronRight,
   Users,
   Shield,
+  KeyRound,
   type LucideProps,
 } from 'lucide-react';
 import { ThemeToggle } from './ThemeToggle';
@@ -31,9 +33,11 @@ interface NavItem {
 const NAV_ITEMS: NavItem[] = [
   { href: '/dashboard', label: 'Dashboard', icon: LayoutDashboard },
   { href: '/devices', label: 'Devices', icon: Monitor },
+  { href: '/viewer', label: 'Remote Viewer', icon: Tv2 },
   { href: '/teams', label: 'Teams', icon: Users },
   { href: '/sessions', label: 'Sessions', icon: Clock },
   { href: '/audit', label: 'Audit Log', icon: Shield },
+  { href: '/api-keys', label: 'API Keys', icon: KeyRound },
   { href: '/billing', label: 'Billing', icon: CreditCard },
   { href: '/settings', label: 'Settings', icon: Settings },
 ];

@@ -32,6 +32,9 @@ import {
   updateTeamName,
   deleteTeam,
   canManageTeam,
+  createApiKey,
+  getApiKeysByUserId,
+  revokeApiKey,
 } from './db.js';
 import {
   hashPassword,
@@ -39,10 +42,22 @@ import {
   signToken,
   requireAuth,
   toPublicUser,
+  hashApiKey,
+  generateApiKey,
   type AuthRequest,
 } from './auth.js';
+import {
+  generateState,
+  validateState,
+  buildGoogleAuthUrl,
+  exchangeGoogleCode,
+  buildGithubAuthUrl,
+  exchangeGithubCode,
+} from './oauth.js';
 import { loginLimiter } from './ratelimit.js';
 import type { SignalingServer } from './signaling.js';
+
+const WEB_URL = process.env.WEB_URL ?? 'http://localhost:3001';
 
 // ---------------------------------------------------------------------------
 // Plans (hardcoded — no Stripe yet)
@@ -230,6 +245,133 @@ export function createApiRouter(signaling: SignalingServer): Router {
     }
     const newHash = await hashPassword(newPassword);
     updateUserPassword(req.userId!, newHash);
+    res.status(204).send();
+  });
+
+  // =========================================================================
+  // OAuth SSO — Google & GitHub
+  //
+  // Users created via OAuth have password_hash = 'oauth'. This is intentional:
+  // they can only sign in through OAuth flows and cannot use the password login
+  // endpoint (verifyPassword against 'oauth' will always return false).
+  // =========================================================================
+
+  /** GET /api/auth/oauth/google — redirect to Google consent screen */
+  router.get('/auth/oauth/google', (_req: Request, res: Response) => {
+    const state = generateState('google');
+    res.redirect(buildGoogleAuthUrl(state));
+  });
+
+  /** GET /api/auth/oauth/google/callback — handle Google redirect */
+  router.get('/auth/oauth/google/callback', async (req: Request, res: Response) => {
+    const { code, state } = req.query as { code?: string; state?: string };
+
+    // validateState validates and consumes the CSRF state token.
+    // It returns null if the state is missing, expired, or for a different provider.
+    if (!code || !state || validateState(state, 'google') === false) {
+      res.redirect(`${WEB_URL}/login?error=oauth_failed`);
+      return;
+    }
+
+    try {
+      const { email, name } = await exchangeGoogleCode(code);
+
+      let user = getUserByEmail(email.toLowerCase());
+      if (!user) {
+        user = createUser(uuidv4(), email.toLowerCase(), 'oauth', name);
+      }
+
+      const token = signToken(user);
+      res.redirect(`${WEB_URL}/auth/callback?token=${encodeURIComponent(token)}`);
+    } catch (err) {
+      console.error('[oauth:google]', err);
+      res.redirect(`${WEB_URL}/login?error=oauth_failed`);
+    }
+  });
+
+  /** GET /api/auth/oauth/github — redirect to GitHub consent screen */
+  router.get('/auth/oauth/github', (_req: Request, res: Response) => {
+    const state = generateState('github');
+    res.redirect(buildGithubAuthUrl(state));
+  });
+
+  /** GET /api/auth/oauth/github/callback — handle GitHub redirect */
+  router.get('/auth/oauth/github/callback', async (req: Request, res: Response) => {
+    const { code, state } = req.query as { code?: string; state?: string };
+
+    // validateState validates and consumes the CSRF state token.
+    // It returns null if the state is missing, expired, or for a different provider.
+    if (!code || !state || validateState(state, 'github') === false) {
+      res.redirect(`${WEB_URL}/login?error=oauth_failed`);
+      return;
+    }
+
+    try {
+      const { email, name } = await exchangeGithubCode(code);
+
+      let user = getUserByEmail(email.toLowerCase());
+      if (!user) {
+        user = createUser(uuidv4(), email.toLowerCase(), 'oauth', name);
+      }
+
+      const token = signToken(user);
+      res.redirect(`${WEB_URL}/auth/callback?token=${encodeURIComponent(token)}`);
+    } catch (err) {
+      console.error('[oauth:github]', err);
+      res.redirect(`${WEB_URL}/login?error=oauth_failed`);
+    }
+  });
+
+  // =========================================================================
+  // API Keys
+  // =========================================================================
+
+  /** GET /api/keys — list the authenticated user's API keys (never exposes hash) */
+  router.get('/keys', requireAuth, (req: AuthRequest, res: Response) => {
+    const keys = getApiKeysByUserId(req.userId!).map((k) => ({
+      id: k.id,
+      name: k.name,
+      prefix: k.key_prefix,
+      lastUsed: k.last_used,
+      createdAt: k.created_at,
+    }));
+    res.json({ keys });
+  });
+
+  /** POST /api/keys — create a new API key; full key returned ONCE */
+  router.post('/keys', requireAuth, (req: AuthRequest, res: Response) => {
+    const { name } = req.body as { name?: string };
+    if (!name || !name.trim()) {
+      res.status(400).json({ error: 'name is required' });
+      return;
+    }
+
+    const rawKey = generateApiKey();
+    const keyHash = hashApiKey(rawKey);
+    // Store first 8 chars as the visible prefix (e.g. "dd_abc1")
+    const keyPrefix = rawKey.slice(0, 8);
+    const id = uuidv4();
+
+    const apiKey = createApiKey(id, req.userId!, name.trim(), keyHash, keyPrefix);
+
+    res.status(201).json({
+      key: rawKey,
+      apiKey: {
+        id: apiKey.id,
+        name: apiKey.name,
+        prefix: apiKey.key_prefix,
+        createdAt: apiKey.created_at,
+      },
+    });
+  });
+
+  /** DELETE /api/keys/:id — revoke an API key */
+  router.delete('/keys/:id', requireAuth, (req: AuthRequest, res: Response) => {
+    const deleted = revokeApiKey(req.params.id, req.userId!);
+    if (!deleted) {
+      res.status(404).json({ error: 'API key not found' });
+      return;
+    }
     res.status(204).send();
   });
 

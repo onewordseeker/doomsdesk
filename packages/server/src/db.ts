@@ -95,6 +95,18 @@ function initSchema(db: Database.Database): void {
     );
 
     CREATE INDEX IF NOT EXISTS idx_team_members_user ON team_members(user_id);
+
+    CREATE TABLE IF NOT EXISTS api_keys (
+      id          TEXT PRIMARY KEY,
+      user_id     TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      name        TEXT NOT NULL,
+      key_hash    TEXT NOT NULL,
+      key_prefix  TEXT NOT NULL,
+      last_used   INTEGER,
+      created_at  INTEGER NOT NULL DEFAULT (unixepoch())
+    );
+    CREATE INDEX IF NOT EXISTS idx_api_keys_user ON api_keys(user_id);
+    CREATE INDEX IF NOT EXISTS idx_api_keys_hash ON api_keys(key_hash);
   `);
 }
 
@@ -540,4 +552,58 @@ export function canManageTeam(role: string): boolean {
 
 export function canViewTeam(role: string): boolean {
   return ['owner', 'admin', 'member', 'viewer'].includes(role);
+}
+
+// ---------------------------------------------------------------------------
+// API key interfaces and queries
+// ---------------------------------------------------------------------------
+
+export interface DbApiKey {
+  id: string;
+  user_id: string;
+  name: string;
+  key_hash: string;
+  key_prefix: string;
+  last_used: number | null;
+  created_at: number;
+}
+
+export function createApiKey(
+  id: string,
+  userId: string,
+  name: string,
+  keyHash: string,
+  keyPrefix: string
+): DbApiKey {
+  getDb().prepare(
+    `INSERT INTO api_keys (id, user_id, name, key_hash, key_prefix) VALUES (?, ?, ?, ?, ?)`
+  ).run(id, userId, name, keyHash, keyPrefix);
+  return getDb().prepare<[string], DbApiKey>(
+    `SELECT * FROM api_keys WHERE id = ?`
+  ).get(id)!;
+}
+
+export function getApiKeysByUserId(userId: string): DbApiKey[] {
+  return getDb().prepare<[string], DbApiKey>(
+    `SELECT * FROM api_keys WHERE user_id = ? ORDER BY created_at DESC`
+  ).all(userId);
+}
+
+export function getApiKeyByHash(hash: string): DbApiKey | undefined {
+  return getDb().prepare<[string], DbApiKey>(
+    `SELECT * FROM api_keys WHERE key_hash = ?`
+  ).get(hash);
+}
+
+export function revokeApiKey(id: string, userId: string): boolean {
+  const result = getDb().prepare(
+    `DELETE FROM api_keys WHERE id = ? AND user_id = ?`
+  ).run(id, userId);
+  return result.changes > 0;
+}
+
+export function touchApiKeyLastUsed(id: string): void {
+  getDb().prepare(
+    `UPDATE api_keys SET last_used = unixepoch() WHERE id = ?`
+  ).run(id);
 }

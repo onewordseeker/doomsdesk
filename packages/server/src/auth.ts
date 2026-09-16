@@ -1,7 +1,8 @@
 import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
+import crypto from 'crypto';
 import type { Request, Response, NextFunction } from 'express';
-import { getUserById, type DbUser } from './db.js';
+import { getUserById, getApiKeyByHash, touchApiKeyLastUsed, type DbUser } from './db.js';
 
 // ---------------------------------------------------------------------------
 // Config
@@ -22,6 +23,20 @@ export async function hashPassword(plain: string): Promise<string> {
 
 export async function verifyPassword(plain: string, hash: string): Promise<boolean> {
   return bcrypt.compare(plain, hash);
+}
+
+// ---------------------------------------------------------------------------
+// API key utilities
+// ---------------------------------------------------------------------------
+
+/** SHA-256 hash of an API key for safe storage */
+export function hashApiKey(key: string): string {
+  return crypto.createHash('sha256').update(key).digest('hex');
+}
+
+/** Generate a new API key: dd_ + 40 random hex chars */
+export function generateApiKey(): string {
+  return 'dd_' + crypto.randomBytes(20).toString('hex');
 }
 
 // ---------------------------------------------------------------------------
@@ -57,6 +72,35 @@ export function requireAuth(
   next: NextFunction
 ): void {
   const authHeader = req.headers.authorization;
+  const apiKeyHeader = req.headers['x-api-key'] as string | undefined;
+
+  // --- API key authentication ---
+  // Accepts: X-API-Key: <key>  OR  Authorization: ApiKey <key>
+  const rawApiKey =
+    apiKeyHeader ??
+    (authHeader?.startsWith('ApiKey ') ? authHeader.slice(7) : undefined);
+
+  if (rawApiKey) {
+    const hash = hashApiKey(rawApiKey);
+    const apiKey = getApiKeyByHash(hash);
+    if (!apiKey) {
+      res.status(401).json({ error: 'Invalid API key' });
+      return;
+    }
+    const user = getUserById(apiKey.user_id);
+    if (!user) {
+      res.status(401).json({ error: 'User not found' });
+      return;
+    }
+    // Update last_used asynchronously (fire and forget)
+    touchApiKeyLastUsed(apiKey.id);
+    req.userId = user.id;
+    req.userEmail = user.email;
+    next();
+    return;
+  }
+
+  // --- JWT bearer authentication ---
   if (!authHeader?.startsWith('Bearer ')) {
     res.status(401).json({ error: 'Missing or malformed Authorization header' });
     return;

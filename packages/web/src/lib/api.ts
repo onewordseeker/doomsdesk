@@ -116,6 +116,14 @@ export interface AuditLog {
   createdAt: number;
 }
 
+export interface ApiKey {
+  id: string;
+  name: string;
+  prefix: string;
+  lastUsed: number | null;
+  createdAt: number;
+}
+
 // ─── Core fetch wrapper ───────────────────────────────────────────────────────
 
 async function request<T>(
@@ -306,6 +314,23 @@ export async function updateMemberRole(teamId: string, userId: string, role: str
     method: 'PATCH',
     body: JSON.stringify({ role }),
   });
+}
+
+// ─── API Keys ─────────────────────────────────────────────────────────────────
+
+export async function getApiKeys(): Promise<{ keys: ApiKey[] }> {
+  return request<{ keys: ApiKey[] }>('/keys');
+}
+
+export async function createApiKey(name: string): Promise<{ key: string; apiKey: ApiKey }> {
+  return request<{ key: string; apiKey: ApiKey }>('/keys', {
+    method: 'POST',
+    body: JSON.stringify({ name }),
+  });
+}
+
+export async function revokeApiKey(id: string): Promise<void> {
+  return request(`/keys/${id}`, { method: 'DELETE' });
 }
 
 // ─── Audit Logs ───────────────────────────────────────────────────────────────
