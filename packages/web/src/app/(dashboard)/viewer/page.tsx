@@ -531,6 +531,42 @@ function ViewerInner() {
     sendInput({ type: 'wheel', deltaX: e.deltaX, deltaY: e.deltaY });
   }
 
+  // Touch event handlers — map to mouse events for mobile/tablet support
+  const lastTouchRef = useRef<{ x: number; y: number } | null>(null);
+
+  function onCanvasTouchStart(e: React.TouchEvent<HTMLCanvasElement>) {
+    e.preventDefault();
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const rect = canvas.getBoundingClientRect();
+    const t = e.touches[0];
+    const x = (t.clientX - rect.left) / rect.width;
+    const y = (t.clientY - rect.top) / rect.height;
+    lastTouchRef.current = { x, y };
+    sendInput({ type: 'mousemove', x, y });
+    sendInput({ type: 'mousedown', button: 0, x, y });
+  }
+
+  function onCanvasTouchMove(e: React.TouchEvent<HTMLCanvasElement>) {
+    e.preventDefault();
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const rect = canvas.getBoundingClientRect();
+    const t = e.touches[0];
+    const x = (t.clientX - rect.left) / rect.width;
+    const y = (t.clientY - rect.top) / rect.height;
+    lastTouchRef.current = { x, y };
+    sendInput({ type: 'mousemove', x, y });
+  }
+
+  function onCanvasTouchEnd(e: React.TouchEvent<HTMLCanvasElement>) {
+    e.preventDefault();
+    const last = lastTouchRef.current;
+    if (!last) return;
+    sendInput({ type: 'mouseup', button: 0, ...last });
+    lastTouchRef.current = null;
+  }
+
   function onCanvasKeyDown(e: ReactKeyboardEvent<HTMLCanvasElement>) {
     e.preventDefault();
     // Ctrl+V or Cmd+V: push local clipboard to remote
@@ -806,6 +842,9 @@ function ViewerInner() {
               onWheel={onCanvasWheel}
               onKeyDown={onCanvasKeyDown}
               onKeyUp={onCanvasKeyUp}
+              onTouchStart={onCanvasTouchStart}
+              onTouchMove={onCanvasTouchMove}
+              onTouchEnd={onCanvasTouchEnd}
               onContextMenu={(e) => e.preventDefault()}
             />
 
