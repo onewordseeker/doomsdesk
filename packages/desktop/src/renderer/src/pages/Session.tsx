@@ -81,6 +81,7 @@ export default function Session({ peerId, role, onEnd }: Props) {
   const [showFiles, setShowFiles] = useState(false)
   const [micActive, setMicActive] = useState(false)
   const [recording, setRecording] = useState(false)
+  const [peerRtt, setPeerRtt] = useState<number | null>(null)
   const [remoteAudioEl] = useState(() => {
     const el = document.createElement('audio')
     el.autoplay = true
@@ -174,9 +175,20 @@ export default function Session({ peerId, role, onEnd }: Props) {
 
     pc.onconnectionstatechange = () => {
       diag(`RTC: ${pc.connectionState}`)
-      if (pc.connectionState === 'connected') setConnState('connected')
-      else if (pc.connectionState === 'failed') setConnState('failed')
-      else if (pc.connectionState === 'disconnected') setConnState('disconnected')
+      if (pc.connectionState === 'connected') {
+        setConnState('connected')
+      } else if (pc.connectionState === 'disconnected') {
+        setConnState('disconnected')
+        // Attempt ICE restart after a brief pause
+        setTimeout(() => {
+          if (pc.connectionState === 'disconnected' || pc.connectionState === 'failed') {
+            diag('ICE restart attempted')
+            try { pc.restartIce() } catch {}
+          }
+        }, 3000)
+      } else if (pc.connectionState === 'failed') {
+        setConnState('failed')
+      }
     }
 
     if (role === 'agent') {
@@ -330,6 +342,8 @@ export default function Session({ peerId, role, onEnd }: Props) {
             }
             sendChunk()
           }).catch((e) => diag(`screenshot err: ${e}`))
+        } else if (msg.type === 'ping') {
+          if (inputDc.readyState === 'open') inputDc.send(JSON.stringify({ type: 'pong', t: msg.t }))
         } else if (msg.type === 'chat') {
           diag(`[chat] ${msg.text ?? ''}`)
         } else {
@@ -464,12 +478,19 @@ export default function Session({ peerId, role, onEnd }: Props) {
               diag(`remote clipboard pulled (${(msg.text ?? '').length} chars)`)
             } else if (msg.type === 'stats') {
               setRenderStats({ fps: msg.fps, decodeMs: msg.decodeMs })
+            } else if (msg.type === 'pong') {
+              if (msg.t) setPeerRtt(Date.now() - msg.t)
             } else if (msg.type === 'chat') {
               setChatMessages((prev) => [...prev, { from: 'them', text: msg.text ?? '', ts: Date.now() }])
               setChatOpen(true)
             }
           } catch {}
         }
+        // Send pings every 5s to measure peer RTT
+        const pingId = setInterval(() => {
+          if (dc.readyState === 'open') dc.send(JSON.stringify({ type: 'ping', t: Date.now() }))
+        }, 5000)
+        dc.onclose = () => { diag('input DC closed'); clearInterval(pingId) }
       } else if (dc.label === 'files') {
         dc.binaryType = 'arraybuffer'
         fileDcRef.current = dc
@@ -694,11 +715,18 @@ export default function Session({ peerId, role, onEnd }: Props) {
     }
   }, [fullscreen])
 
-  // F11 toggles fullscreen
+  // F11 toggles fullscreen; Ctrl+= zoom in; Ctrl+- zoom out; Ctrl+0 reset zoom
   useEffect(() => {
     if (role !== 'controller') return
     const onKey = (e: KeyboardEvent) => {
       if (e.key === 'F11') { e.preventDefault(); toggleFullscreen() }
+      else if ((e.ctrlKey || e.metaKey) && (e.key === '=' || e.key === '+')) {
+        e.preventDefault(); setZoom((z) => Math.min(3, z + 0.25))
+      } else if ((e.ctrlKey || e.metaKey) && e.key === '-') {
+        e.preventDefault(); setZoom((z) => Math.max(0.5, z - 0.25))
+      } else if ((e.ctrlKey || e.metaKey) && e.key === '0') {
+        e.preventDefault(); setZoom(1)
+      }
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
@@ -770,6 +798,7 @@ export default function Session({ peerId, role, onEnd }: Props) {
           {renderStats && (
             <span className="text-xs font-mono text-slate-500 tabular-nums">
               {renderStats.fps.toFixed(0)} fps · {renderStats.decodeMs} ms
+              {peerRtt !== null && ` · ${peerRtt}ms rtt`}
             </span>
           )}
           <span className="text-xs px-1.5 py-0.5 rounded bg-surface text-slate-400">Controller</span>
