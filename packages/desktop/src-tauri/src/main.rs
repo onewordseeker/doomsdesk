@@ -392,7 +392,7 @@ fn set_capture_quality(state: State<'_, AppState>, quality: u8) {
 
 #[tauri::command]
 fn set_capture_bitrate(state: State<'_, AppState>, bps: u32) {
-    let clamped = bps.clamp(2_000_000, 8_000_000);
+    let clamped = bps.clamp(2_000_000, 20_000_000);
     state.capture_bitrate.store(clamped, Ordering::Relaxed);
 }
 

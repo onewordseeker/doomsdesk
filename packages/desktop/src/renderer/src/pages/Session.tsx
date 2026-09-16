@@ -406,8 +406,8 @@ export default function Session({ peerId, role, onEnd }: Props) {
         diag(`bitrate ↓ ${(currentBps / 1_000_000).toFixed(1)} Mbps`)
       } else if (skipRate === 0) {
         stableWindows++
-        if (stableWindows >= 2 && currentBps < 8_000_000) {
-          currentBps = Math.min(8_000_000, Math.round(currentBps * 1.2))
+        if (stableWindows >= 2 && currentBps < 16_000_000) {
+          currentBps = Math.min(16_000_000, Math.round(currentBps * 1.2))
           invoke('set_capture_bitrate', { bps: currentBps }).catch(() => {})
           stableWindows = 0
           diag(`bitrate ↑ ${(currentBps / 1_000_000).toFixed(1)} Mbps`)

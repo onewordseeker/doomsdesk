@@ -393,7 +393,7 @@ mod platform {
         }
 
         pub fn set_bitrate(&mut self, bps: u32) {
-            let v = cf_i32(bps.clamp(2_000_000, 8_000_000) as i32);
+            let v = cf_i32(bps.clamp(2_000_000, 20_000_000) as i32);
             unsafe {
                 VTSessionSetProperty(self.session, kVTCompressionPropertyKey_AverageBitRate, v as *const c_void);
                 CFRelease(v as *const c_void);
