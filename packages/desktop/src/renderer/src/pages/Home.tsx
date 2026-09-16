@@ -59,6 +59,7 @@ export default function Home() {
   const [perms, setPerms] = useState<{ accessibility: boolean; screenRecording: boolean } | null>(null)
   const pollRef = useRef<ReturnType<typeof setInterval>>()
   const connectTimerRef = useRef<ReturnType<typeof setTimeout>>()
+  const autoDenyRef = useRef<ReturnType<typeof setTimeout>>()
 
   // Refs so the stale signaling-message closure can read current form values
   const connectIdRef = useRef(connectId)
@@ -96,7 +97,8 @@ export default function Home() {
           const sid = msg.sourceId
           setIncomingConn({ sourceId: sid })
           // Auto-deny after 60s if the user doesn't respond
-          setTimeout(() => {
+          clearTimeout(autoDenyRef.current)
+          autoDenyRef.current = setTimeout(() => {
             setIncomingConn((current) => {
               if (current?.sourceId === sid) {
                 invoke('respond_to_connection', { sourceId: sid, approved: false }).catch(() => {})
@@ -120,6 +122,7 @@ export default function Home() {
 
     return () => {
       clearInterval(pollRef.current)
+      clearTimeout(autoDenyRef.current)
       unsubSignal.then((f) => f())
       unsubRtt.then((f) => f())
       unsubDisc.then((f) => f())
@@ -189,6 +192,7 @@ export default function Home() {
 
   async function handleApprove(approved: boolean) {
     if (!incomingConn) return
+    clearTimeout(autoDenyRef.current)
     await invoke('respond_to_connection', { sourceId: incomingConn.sourceId, approved })
     setIncomingConn(null)
     if (approved) {

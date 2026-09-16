@@ -206,11 +206,17 @@ async fn save_received_file(app: AppHandle, name: String, data: Vec<u8>) -> Resu
 
     if let Some(dir) = downloads {
         if dir.exists() {
+            // Strip any path components from the remote-supplied name to prevent traversal.
+            let safe_name = std::path::Path::new(&name)
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("received_file")
+                .to_string();
             // Avoid overwriting: append a counter if file already exists
-            let mut dest = dir.join(&name);
-            let stem = std::path::Path::new(&name)
-                .file_stem().and_then(|s| s.to_str()).unwrap_or(&name);
-            let ext = std::path::Path::new(&name)
+            let mut dest = dir.join(&safe_name);
+            let stem = std::path::Path::new(&safe_name)
+                .file_stem().and_then(|s| s.to_str()).unwrap_or(&safe_name);
+            let ext = std::path::Path::new(&safe_name)
                 .extension().and_then(|s| s.to_str()).unwrap_or("");
             let mut counter = 1u32;
             while dest.exists() {
@@ -225,7 +231,7 @@ async fn save_received_file(app: AppHandle, name: String, data: Vec<u8>) -> Resu
             std::fs::write(&dest, &data).map_err(|e| e.to_string())?;
             // Notify the frontend where the file was saved
             let _ = app.emit("file-saved", serde_json::json!({
-                "name": name,
+                "name": safe_name,
                 "path": dest.to_string_lossy(),
             }));
             return Ok(());
@@ -509,8 +515,9 @@ async fn start_native_capture(app: AppHandle, state: State<'_, AppState>) -> Res
                 // Live bitrate adaptation — no encoder recreation needed on macOS
                 let wanted_bps = bitrate_ref.load(Ordering::Relaxed);
                 if wanted_bps != last_bitrate {
-                    enc.set_bitrate(wanted_bps.max(2_000_000));
-                    last_bitrate = wanted_bps;
+                    let clamped = wanted_bps.max(2_000_000);
+                    enc.set_bitrate(clamped);
+                    last_bitrate = clamped; // track what was actually set, not the raw atomic value
                 }
 
                 // Perceptual hash: sample every 512th byte with LCG mix

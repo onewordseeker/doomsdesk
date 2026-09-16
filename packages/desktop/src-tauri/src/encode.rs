@@ -255,6 +255,7 @@ mod platform {
                         data[off], data[off+1], data[off+2], data[off+3],
                     ]) as usize;
                     off += 4;
+                    if nal_len == 0 { continue; } // skip empty filler NAL units
                     if off + nal_len > total { break; }
                     out.extend_from_slice(&[0, 0, 0, 1]);
                     out.extend_from_slice(&data[off..off + nal_len]);
@@ -339,9 +340,10 @@ mod platform {
         }
 
         pub fn encode(&mut self, rgba: &[u8], width: u32, height: u32, pts_ms: u64) -> Option<EncodedFrame> {
-            // RGBA → BGRA swap (VideoToolbox kCVPixelFormatType_32BGRA)
+            // macOS captures BGRX [B,G,R,X]. VideoToolbox kCVPixelFormatType_32BGRA
+            // expects [B,G,R,A] — channels already in correct order, just set alpha=255.
             let mut bgra = rgba.to_vec();
-            for p in bgra.chunks_exact_mut(4) { p.swap(0, 2); }
+            for p in bgra.chunks_exact_mut(4) { p[3] = 255; }
 
             let w = width as usize;
             let h = height as usize;

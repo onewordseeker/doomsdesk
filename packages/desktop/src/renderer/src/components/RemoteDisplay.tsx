@@ -25,6 +25,7 @@ export default function RemoteDisplay({ framesChannel, dataChannel, remoteScreen
   const wheelAccXRef = useRef(0) // accumulated horizontal scroll
   const pointerLockedRef = useRef(false)
   const isComposingRef = useRef(false)
+  const lastCursorPosRef = useRef({ x: 0, y: 0 })
   const [frozen, setFrozen] = useState(false)
   const [hasFrames, setHasFrames] = useState(false)
   const [pointerLocked, setPointerLocked] = useState(false)
@@ -248,7 +249,9 @@ export default function RemoteDisplay({ framesChannel, dataChannel, remoteScreen
   useEffect(() => {
     const flush = () => {
       releaseModifiers()
-      sendInput({ type: 'mouseup', x: 0, y: 0, button: 'left' })
+      // Use last known cursor position — avoids injecting a click at (0,0) on the remote
+      const { x, y } = lastCursorPosRef.current
+      sendInput({ type: 'mouseup', x, y, button: 'left' })
     }
     const onVis = () => { if (document.hidden) flush() }
     window.addEventListener('blur', flush)
@@ -269,6 +272,7 @@ export default function RemoteDisplay({ framesChannel, dataChannel, remoteScreen
       }
     } else {
       const { x, y } = toRemote(e)
+      lastCursorPosRef.current = { x, y }
       sendInput({ type: 'mousemove', x, y })
     }
   }, [dataChannel, remoteScreenSize, stretch])

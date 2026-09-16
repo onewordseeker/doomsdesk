@@ -106,8 +106,18 @@ export default function Session({ peerId, role, onEnd }: Props) {
   const [remoteAudioEl] = useState(() => {
     const el = document.createElement('audio')
     el.autoplay = true
+    el.style.display = 'none'
     return el
   })
+
+  // Attach audio element to DOM so autoplay works in all WebViews; clean up on unmount
+  useEffect(() => {
+    document.body.appendChild(remoteAudioEl)
+    return () => {
+      remoteAudioEl.srcObject = null
+      if (document.body.contains(remoteAudioEl)) document.body.removeChild(remoteAudioEl)
+    }
+  }, [])
 
   // Auto-remove completed file transfers 8s after the last one finishes
   const doneFtIds = fileTransfers.filter((ft) => ft.done).map((ft) => ft.id).join(',')
@@ -184,6 +194,7 @@ export default function Session({ peerId, role, onEnd }: Props) {
   const pendingTransfersRef = useRef<Map<string, FileTransfer>>(new Map())
   const micStreamRef = useRef<MediaStream | null>(null)
   const micSenderRef = useRef<RTCRtpSender | null>(null)
+  const connTimeoutRef = useRef<ReturnType<typeof setTimeout>>()
 
   function diag(msg: string) {
     const ts = new Date().toISOString().slice(11, 23)
@@ -266,7 +277,7 @@ export default function Session({ peerId, role, onEnd }: Props) {
 
     // Connection timeout: fail after 30s if we never reach 'connected'
     let connected = false
-    const connTimeout = setTimeout(() => {
+    connTimeoutRef.current = setTimeout(() => {
       if (!connected && pc.connectionState !== 'connected') {
         diag('connection timed out after 30s')
         setConnState('failed')
@@ -278,7 +289,7 @@ export default function Session({ peerId, role, onEnd }: Props) {
       diag(`RTC: ${pc.connectionState}`)
       if (pc.connectionState === 'connected') {
         connected = true
-        clearTimeout(connTimeout)
+        clearTimeout(connTimeoutRef.current)
         setConnState('connected')
         if (role === 'controller') {
           invoke('update_tray_tooltip', { tooltip: `DoomsDesk — Active (${peerId})` }).catch(() => {})
@@ -298,7 +309,7 @@ export default function Session({ peerId, role, onEnd }: Props) {
           }, 3000)
         }
       } else if (pc.connectionState === 'failed') {
-        clearTimeout(connTimeout)
+        clearTimeout(connTimeoutRef.current)
         setConnState('failed')
         invoke('update_tray_tooltip', { tooltip: 'DoomsDesk' }).catch(() => {})
       }
@@ -390,7 +401,7 @@ export default function Session({ peerId, role, onEnd }: Props) {
           if (!t) return
           const blob = new Blob(t.chunks)
           const data = new Uint8Array(await blob.arrayBuffer())
-          invoke('save_received_file', { name: t.name, data: Array.from(data) }).catch(() => {})
+          invoke('save_received_file', { name: t.name, data }).catch(() => {})
           t.done = true
           pendingTransfersRef.current.delete(msg.id)
           setFileTransfers((prev) => prev.map((f) => f.id === msg.id ? { ...f, done: true } : f))
@@ -721,8 +732,7 @@ export default function Session({ peerId, role, onEnd }: Props) {
                 if (!t) return
                 const blob = new Blob(t.chunks)
                 blob.arrayBuffer().then((ab) => {
-                  const data = Array.from(new Uint8Array(ab))
-                  invoke('save_received_file', { name: t.name, data }).catch(() => {})
+                  invoke('save_received_file', { name: t.name, data: new Uint8Array(ab) }).catch(() => {})
                 })
                 t.done = true
                 pendingTransfersRef.current.delete(msg.id)
@@ -806,10 +816,12 @@ export default function Session({ peerId, role, onEnd }: Props) {
       packet.set(idBytes, 0)
       packet.set(new Uint8Array(slice), 36)
 
-      // Respect back-pressure
+      // Respect back-pressure; abort if the channel closes mid-transfer
       while (dc.bufferedAmount > 1_048_576) {
+        if (dc.readyState !== 'open') return
         await new Promise((r) => setTimeout(r, 50))
       }
+      if (dc.readyState !== 'open') return
 
       dc.send(packet.buffer)
       offset += slice.byteLength
@@ -823,7 +835,7 @@ export default function Session({ peerId, role, onEnd }: Props) {
     diag(`file sent: ${name}`)
   }
 
-  async function toggleMic() {
+  const toggleMic = useCallback(async () => {
     const pc = pcRef.current
     if (!pc) return
 
@@ -857,10 +869,11 @@ export default function Session({ peerId, role, onEnd }: Props) {
         diag(`mic error: ${e}`)
       }
     }
-  }
+  }, [micActive])
 
   function cleanup(keepDuration = false) {
     if (!keepDuration) clearInterval(durationRef.current)
+    clearTimeout(connTimeoutRef.current)
     clearInterval(screenCheckRef.current)
     if (role === 'agent') {
       invoke('stop_native_capture').catch(() => {})
@@ -1008,7 +1021,7 @@ export default function Session({ peerId, role, onEnd }: Props) {
       window.removeEventListener('keydown', onKey)
       window.removeEventListener('mousedown', onClick)
     }
-  }, [role, toggleFullscreen, fullscreen])
+  }, [role, toggleFullscreen, fullscreen, toggleMic])
 
   function sendDisplayResolution(preset: DisplayPreset) {
     setDisplayPreset(preset)
@@ -1021,11 +1034,9 @@ export default function Session({ peerId, role, onEnd }: Props) {
 
   async function handleRecordingDone(blob: Blob) {
     setRecording(false)
-    // Save via Tauri dialog
     const ab = await blob.arrayBuffer()
-    const data = Array.from(new Uint8Array(ab))
     const ts = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19)
-    invoke('save_received_file', { name: `session-${ts}.webm`, data }).catch(() => {})
+    invoke('save_received_file', { name: `session-${ts}.webm`, data: new Uint8Array(ab) }).catch(() => {})
   }
 
   function sendSpecialKey(combo: string) {
@@ -1688,7 +1699,7 @@ export default function Session({ peerId, role, onEnd }: Props) {
         onDrop={(e) => {
           e.preventDefault()
           setDragOver(false)
-          Array.from(e.dataTransfer.files).filter((f) => f.size > 0).forEach(sendFile)
+          Array.from(e.dataTransfer.files).filter((f) => f.size > 0).forEach((f) => sendFile(f).catch(() => {}))
         }}
       >
         <RemoteDisplay
