@@ -1,10 +1,10 @@
 'use client'
 export const dynamic = 'force-dynamic'
-import { useEffect } from 'react'
+import { Suspense, useEffect } from 'react'
 import { useRouter, useSearchParams } from 'next/navigation'
 import { setToken } from '@/lib/api'
 
-export default function AuthCallback() {
+function CallbackInner() {
   const router = useRouter()
   const params = useSearchParams()
 
@@ -18,9 +18,16 @@ export default function AuthCallback() {
     }
   }, [params, router])
 
+  return null
+}
+
+export default function AuthCallback() {
   return (
     <div className="min-h-screen bg-dark-bg flex items-center justify-center">
       <div className="text-dark-muted text-sm animate-pulse">Signing you in…</div>
+      <Suspense>
+        <CallbackInner />
+      </Suspense>
     </div>
   )
 }

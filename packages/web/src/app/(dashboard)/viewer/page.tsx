@@ -6,6 +6,7 @@ import {
   useState,
   useEffect,
   useCallback,
+  Suspense,
   type FormEvent,
   type KeyboardEvent as ReactKeyboardEvent,
 } from 'react';
@@ -91,7 +92,7 @@ function detectCodec(data: Uint8Array): 'h264' | 'h265' | null {
 // Main component
 // ---------------------------------------------------------------------------
 
-export default function ViewerPage() {
+function ViewerInner() {
   const searchParams = useSearchParams();
 
   // Form state
@@ -830,5 +831,13 @@ export default function ViewerPage() {
         </div>
       )}
     </div>
+  );
+}
+
+export default function ViewerPage() {
+  return (
+    <Suspense fallback={<div className="flex items-center justify-center h-full text-dark-muted">Loading…</div>}>
+      <ViewerInner />
+    </Suspense>
   );
 }
