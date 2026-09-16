@@ -270,7 +270,7 @@ export default function Session({ peerId, role, onEnd }: Props) {
       if (!connected && pc.connectionState !== 'connected') {
         diag('connection timed out after 30s')
         setConnState('failed')
-        setInitError('Connection timed out — check TURN server and firewall')
+        setInitError('Connection timed out — both devices may be on strict firewalls, or the TURN server is unreachable')
       }
     }, 30_000)
 

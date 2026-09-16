@@ -158,7 +158,13 @@ export default function Home() {
     const cleanId = digits.length === 9
       ? `${digits.slice(0, 3)}-${digits.slice(3, 6)}-${digits.slice(6, 9)}`
       : digits
-    await invoke('connect_to_peer', { targetId: cleanId, password: pw })
+    try {
+      await invoke('connect_to_peer', { targetId: cleanId, password: pw })
+    } catch (e) {
+      setConnecting(false)
+      setConnectError(String(e))
+      return
+    }
     // If no connect_result arrives within 8s, show an error
     clearTimeout(connectTimerRef.current)
     connectTimerRef.current = setTimeout(() => {
