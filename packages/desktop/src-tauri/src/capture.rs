@@ -46,9 +46,10 @@ mod macos {
     #[derive(Clone, Copy)]
     struct CGRect { origin: CGPoint, size: CGSize }
 
-    // kCGBitmapByteOrder32Big | kCGImageAlphaNoneSkipLast = 2 | 4 = 6 → RGBX in memory (sRGB)
-    // Using kCGImageAlphaNoneSkipLast (4) alone = RGBX big-endian = R,G,B,X
-    const BITMAP_INFO: u32 = 4;
+    // kCGImageAlphaNoneSkipLast = 5, kCGBitmapByteOrderDefault = 0
+    // On little-endian (all modern Macs): gives BGRX in memory.
+    // encode.rs swaps bytes 0↔2 to get BGRA for VideoToolbox.
+    const BITMAP_INFO: u32 = 5;
 
     #[link(name = "CoreGraphics", kind = "framework")]
     extern "C" {
