@@ -6,7 +6,7 @@ import RemoteDisplay from '../components/RemoteDisplay'
 import {
   Maximize2, Minimize2, ZoomIn, ZoomOut, Expand, Shrink,
   Clipboard, X, Monitor, MessageSquare, Send, Tv2,
-  Upload, Download, Mic, MicOff, Lock, Activity, Camera, Circle, Gauge
+  Upload, Download, Mic, MicOff, Lock, Activity, Camera, Circle, Gauge, Crosshair
 } from 'lucide-react'
 
 interface Props {
@@ -85,6 +85,7 @@ export default function Session({ peerId, role, onEnd }: Props) {
   const [showActionsMenu, setShowActionsMenu] = useState(false)
   const [qualityPreset, setQualityPreset] = useState<'auto' | 'lan' | 'wan' | 'low'>('auto')
   const [dragOver, setDragOver] = useState(false)
+  const [pointerLockEnabled, setPointerLockEnabled] = useState(false)
   const [remoteAudioEl] = useState(() => {
     const el = document.createElement('audio')
     el.autoplay = true
@@ -990,6 +991,13 @@ export default function Session({ peerId, role, onEnd }: Props) {
           >
             <Circle size={14} className={recording ? 'fill-red-500 text-red-500' : ''} />
           </ToolBtn>
+          <ToolBtn
+            onClick={() => setPointerLockEnabled((v) => !v)}
+            title={pointerLockEnabled ? 'Disable pointer lock (gaming mode)' : 'Enable pointer lock (gaming mode — click remote to lock pointer)'}
+            active={pointerLockEnabled}
+          >
+            <Crosshair size={14} />
+          </ToolBtn>
 
           {/* Remote actions dropdown */}
           <div className="relative">
@@ -1213,6 +1221,7 @@ export default function Session({ peerId, role, onEnd }: Props) {
           connState={connState}
           recording={recording}
           onRecordingChunk={handleRecordingDone}
+          pointerLockEnabled={pointerLockEnabled}
         />
       </div>
     </div>

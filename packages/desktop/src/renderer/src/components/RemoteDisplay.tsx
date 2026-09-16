@@ -9,21 +9,42 @@ interface Props {
   connState: 'connecting' | 'connected' | 'failed' | 'disconnected'
   recording?: boolean
   onRecordingChunk?: (blob: Blob) => void
+  pointerLockEnabled?: boolean
 }
 
-export default function RemoteDisplay({ framesChannel, dataChannel, remoteScreenSize, zoom, stretch, connState, recording, onRecordingChunk }: Props) {
+export default function RemoteDisplay({ framesChannel, dataChannel, remoteScreenSize, zoom, stretch, connState, recording, onRecordingChunk, pointerLockEnabled = false }: Props) {
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const containerRef = useRef<HTMLDivElement>(null)
   const dcRef = useRef(dataChannel)
   const lastMoveSentRef = useRef(0)
   const heldModsRef = useRef({ ctrl: false, shift: false, alt: false, meta: false })
   const wheelAccRef = useRef(0) // accumulated scroll delta for trackpad sub-tick events
+  const pointerLockedRef = useRef(false)
   const [frozen, setFrozen] = useState(false)
   const [hasFrames, setHasFrames] = useState(false)
+  const [pointerLocked, setPointerLocked] = useState(false)
   const recorderRef = useRef<MediaRecorder | null>(null)
   const recChunksRef = useRef<Blob[]>([])
 
   useEffect(() => { dcRef.current = dataChannel }, [dataChannel])
+
+  // Pointer lock lifecycle
+  useEffect(() => {
+    const onChange = () => {
+      const locked = document.pointerLockElement === canvasRef.current
+      pointerLockedRef.current = locked
+      setPointerLocked(locked)
+    }
+    document.addEventListener('pointerlockchange', onChange)
+    return () => document.removeEventListener('pointerlockchange', onChange)
+  }, [])
+
+  // Exit pointer lock when disabled from toolbar
+  useEffect(() => {
+    if (!pointerLockEnabled && pointerLockedRef.current) {
+      document.exitPointerLock()
+    }
+  }, [pointerLockEnabled])
 
   // Session recording via canvas.captureStream
   useEffect(() => {
@@ -237,23 +258,42 @@ export default function RemoteDisplay({ framesChannel, dataChannel, remoteScreen
     const now = Date.now()
     if (now - lastMoveSentRef.current < 16) return // ~60hz mouse move
     lastMoveSentRef.current = now
-    const { x, y } = toRemote(e)
-    sendInput({ type: 'mousemove', x, y })
+    if (pointerLockedRef.current) {
+      if (e.movementX !== 0 || e.movementY !== 0) {
+        sendInput({ type: 'mousemove_rel', dx: e.movementX, dy: e.movementY })
+      }
+    } else {
+      const { x, y } = toRemote(e)
+      sendInput({ type: 'mousemove', x, y })
+    }
   }, [dataChannel, remoteScreenSize, stretch])
 
   const onMouseDown = useCallback((e: React.MouseEvent) => {
     e.preventDefault()
     containerRef.current?.focus()
-    const { x, y } = toRemote(e)
-    const button = e.button === 2 ? 'right' : e.button === 1 ? 'middle' : 'left'
-    sendInput({ type: 'mousedown', x, y, button })
-  }, [dataChannel, remoteScreenSize, stretch])
+    // Request pointer lock on left click when enabled
+    if (pointerLockEnabled && !pointerLockedRef.current && e.button === 0) {
+      canvasRef.current?.requestPointerLock()
+    }
+    if (!pointerLockedRef.current) {
+      const { x, y } = toRemote(e)
+      const button = e.button === 2 ? 'right' : e.button === 1 ? 'middle' : 'left'
+      sendInput({ type: 'mousedown', x, y, button })
+    } else {
+      const button = e.button === 2 ? 'right' : e.button === 1 ? 'middle' : 'left'
+      sendInput({ type: 'mousedown', x: 0, y: 0, button })
+    }
+  }, [dataChannel, remoteScreenSize, stretch, pointerLockEnabled])
 
   const onMouseUp = useCallback((e: React.MouseEvent) => {
     e.preventDefault()
-    const { x, y } = toRemote(e)
     const button = e.button === 2 ? 'right' : e.button === 1 ? 'middle' : 'left'
-    sendInput({ type: 'mouseup', x, y, button })
+    if (pointerLockedRef.current) {
+      sendInput({ type: 'mouseup', x: 0, y: 0, button })
+    } else {
+      const { x, y } = toRemote(e)
+      sendInput({ type: 'mouseup', x, y, button })
+    }
   }, [dataChannel, remoteScreenSize, stretch])
 
   const onContextMenu = useCallback((e: React.MouseEvent) => { e.preventDefault() }, [])
@@ -357,6 +397,16 @@ export default function RemoteDisplay({ framesChannel, dataChannel, remoteScreen
           <div className="w-12 h-12 border-2 border-slate-600 border-t-brand rounded-full animate-spin" />
           <span className="text-sm">Connecting…</span>
           <span className="text-xs text-slate-600">Waiting for screen stream from remote device</span>
+        </div>
+      )}
+
+      {/* Pointer lock indicator */}
+      {pointerLocked && (
+        <div className="absolute bottom-4 left-1/2 -translate-x-1/2 z-20 pointer-events-none">
+          <div className="flex items-center gap-2 bg-black/80 border border-brand/30 rounded-full px-3 py-1">
+            <div className="w-1.5 h-1.5 rounded-full bg-brand animate-pulse" />
+            <span className="text-xs text-brand font-medium">Pointer captured — Press Escape to release</span>
+          </div>
         </div>
       )}
     </div>

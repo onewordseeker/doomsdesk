@@ -75,8 +75,15 @@ mod platform {
         ) -> *mut c_void;
         fn CGEventPost(tap: u32, ev: *mut c_void);
         fn CGEventSetFlags(ev: *mut c_void, flags: u64);
+        fn CGEventSetIntegerValueField(ev: *mut c_void, field: i32, val: i64);
+        fn CGEventGetLocation(ev: *mut c_void) -> CGPoint;
+        fn CGEventCreate(src: *mut c_void) -> *mut c_void;
         fn CFRelease(cf: *mut c_void);
     }
+
+    // kCGMouseEventDeltaX = 1, kCGMouseEventDeltaY = 2
+    const MOUSE_DELTA_X: i32 = 1;
+    const MOUSE_DELTA_Y: i32 = 2;
 
     #[inline]
     unsafe fn post_mouse(t: u32, x: f64, y: f64, btn: u32) {
@@ -103,6 +110,10 @@ mod platform {
         );
         if !ev.is_null() { CGEventPost(HID, ev); CFRelease(ev); }
     }
+
+    // Virtual cursor position for relative movement — -1 means "not yet initialized"
+    static CURSOR_X: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(-1);
+    static CURSOR_Y: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(-1);
 
     fn web_key_to_vk(key: &str) -> Option<u16> {
         // Try direct match first, then lowercase for single-char keys
@@ -160,7 +171,38 @@ mod platform {
 
         unsafe {
             match t {
-                "mousemove" => post_mouse(MOVED, x, y, BL),
+                "mousemove" => {
+                    // Sync virtual cursor with absolute position
+                    CURSOR_X.store(x as i64, std::sync::atomic::Ordering::Relaxed);
+                    CURSOR_Y.store(y as i64, std::sync::atomic::Ordering::Relaxed);
+                    post_mouse(MOVED, x, y, BL)
+                }
+
+                "mousemove_rel" => {
+                    let dx = ev["dx"].as_f64().unwrap_or(0.0);
+                    let dy = ev["dy"].as_f64().unwrap_or(0.0);
+                    let old_x = CURSOR_X.load(std::sync::atomic::Ordering::Relaxed);
+                    let old_y = CURSOR_Y.load(std::sync::atomic::Ordering::Relaxed);
+                    if old_x < 0 {
+                        // Not yet initialized — use screen center
+                        let ev0 = CGEventCreate(std::ptr::null_mut());
+                        let loc = if !ev0.is_null() { let p = CGEventGetLocation(ev0); CFRelease(ev0); p } else { CGPoint { x: 960.0, y: 540.0 } };
+                        CURSOR_X.store(loc.x as i64, std::sync::atomic::Ordering::Relaxed);
+                        CURSOR_Y.store(loc.y as i64, std::sync::atomic::Ordering::Relaxed);
+                        return;
+                    }
+                    let new_x = (old_x as f64 + dx).max(0.0);
+                    let new_y = (old_y as f64 + dy).max(0.0);
+                    CURSOR_X.store(new_x as i64, std::sync::atomic::Ordering::Relaxed);
+                    CURSOR_Y.store(new_y as i64, std::sync::atomic::Ordering::Relaxed);
+                    let ev = CGEventCreateMouseEvent(std::ptr::null_mut(), MOVED, CGPoint { x: new_x, y: new_y }, BL);
+                    if !ev.is_null() {
+                        CGEventSetIntegerValueField(ev, MOUSE_DELTA_X, dx as i64);
+                        CGEventSetIntegerValueField(ev, MOUSE_DELTA_Y, dy as i64);
+                        CGEventPost(HID, ev);
+                        CFRelease(ev);
+                    }
+                }
 
                 "mousedown" | "click" => {
                     let click = t == "click";
@@ -322,6 +364,13 @@ mod platform {
         unsafe {
             match t {
                 "mousemove" => { SetCursorPos(x, y); }
+
+                "mousemove_rel" => {
+                    let dx = ev["dx"].as_i64().unwrap_or(0) as i32;
+                    let dy = ev["dy"].as_i64().unwrap_or(0) as i32;
+                    // MOUSEEVENTF_MOVE (0x0001) without ABSOLUTE flag = relative movement
+                    mouse_event(0x0001, dx as u32, dy as u32, 0, 0);
+                }
 
                 "mousedown" | "click" => {
                     SetCursorPos(x, y);
