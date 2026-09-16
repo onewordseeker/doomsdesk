@@ -117,9 +117,11 @@ export default function Session({ peerId, role, onEnd }: Props) {
     return () => clearTimeout(t)
   }, [doneFtIds])
 
-  // Poll WebRTC stats for ICE candidate type every 5s
+  // Poll WebRTC stats for ICE candidate type every 5s.
+  // On first detection, auto-apply quality preset if still in 'auto' mode.
+  const iceTypeDetectedRef = useRef(false)
   useEffect(() => {
-    if (connState !== 'connected') { setIceType(null); return }
+    if (connState !== 'connected') { setIceType(null); iceTypeDetectedRef.current = false; return }
     const poll = async () => {
       const pc = pcRef.current
       if (!pc) return
@@ -129,7 +131,20 @@ export default function Session({ peerId, role, onEnd }: Props) {
           if (s.type === 'candidate-pair' && (s as any).state === 'succeeded' && (s as any).nominated) {
             const local = stats.get((s as any).localCandidateId) as any
             if (local) {
-              setIceType(local.candidateType === 'relay' ? 'relay' : local.candidateType === 'srflx' ? 'srflx' : 'host')
+              const detected: 'host' | 'srflx' | 'relay' =
+                local.candidateType === 'relay' ? 'relay' : local.candidateType === 'srflx' ? 'srflx' : 'host'
+              setIceType(detected)
+              // Auto-boost/cap quality on first detection when preset is 'auto'
+              if (!iceTypeDetectedRef.current) {
+                iceTypeDetectedRef.current = true
+                const autoPreset = detected === 'host' ? 'lan' : detected === 'relay' ? 'wan' : null
+                if (autoPreset) {
+                  setQualityPreset((prev) => prev === 'auto' ? autoPreset : prev)
+                  const dc = dcRef.current
+                  if (dc?.readyState === 'open') dc.send(JSON.stringify({ type: 'set_quality', preset: autoPreset }))
+                  diag(`auto quality: ${autoPreset} (ICE=${detected})`)
+                }
+              }
             }
             break
           }
@@ -270,13 +285,18 @@ export default function Session({ peerId, role, onEnd }: Props) {
         }
       } else if (pc.connectionState === 'disconnected') {
         setConnState('disconnected')
-        // Attempt ICE restart after a brief pause
-        setTimeout(() => {
-          if (pc.connectionState === 'disconnected' || pc.connectionState === 'failed') {
-            diag('ICE restart attempted')
-            try { pc.restartIce() } catch {}
-          }
-        }, 3000)
+        // Attempt ICE restart after a brief pause (controller only — agent just waits)
+        if (role === 'controller') {
+          setTimeout(async () => {
+            if (pc.connectionState !== 'disconnected' && pc.connectionState !== 'failed') return
+            diag('ICE restart — creating new offer')
+            try {
+              const offer = await pc.createOffer({ iceRestart: true })
+              await pc.setLocalDescription(offer)
+              invoke('send_signaling', { msg: { type: 'offer', targetId: peerId, sdp: offer.sdp } })
+            } catch (e) { diag(`ICE restart failed: ${e}`) }
+          }, 3000)
+        }
       } else if (pc.connectionState === 'failed') {
         clearTimeout(connTimeout)
         setConnState('failed')
