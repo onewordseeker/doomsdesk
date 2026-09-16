@@ -82,6 +82,7 @@ export default function Session({ peerId, role, onEnd }: Props) {
   const [micActive, setMicActive] = useState(false)
   const [recording, setRecording] = useState(false)
   const [peerRtt, setPeerRtt] = useState<number | null>(null)
+  const [showActionsMenu, setShowActionsMenu] = useState(false)
   const [remoteAudioEl] = useState(() => {
     const el = document.createElement('audio')
     el.autoplay = true
@@ -737,10 +738,12 @@ export default function Session({ peerId, role, onEnd }: Props) {
   }, [fullscreen])
 
   // F11 toggles fullscreen; Ctrl+= zoom in; Ctrl+- zoom out; Ctrl+0 reset zoom
+  // Click outside closes actions menu
   useEffect(() => {
     if (role !== 'controller') return
     const onKey = (e: KeyboardEvent) => {
       if (e.key === 'F11') { e.preventDefault(); toggleFullscreen() }
+      else if (e.key === 'Escape') { setShowActionsMenu(false) }
       else if ((e.ctrlKey || e.metaKey) && (e.key === '=' || e.key === '+')) {
         e.preventDefault(); setZoom((z) => Math.min(3, z + 0.25))
       } else if ((e.ctrlKey || e.metaKey) && e.key === '-') {
@@ -944,21 +947,38 @@ export default function Session({ peerId, role, onEnd }: Props) {
             <Circle size={14} className={recording ? 'fill-red-500 text-red-500' : ''} />
           </ToolBtn>
 
-          <ToolBtn onClick={() => sendSpecialKey('lock')} title="Lock remote screen">
-            <Lock size={14} />
-          </ToolBtn>
-          <ToolBtn onClick={() => sendSpecialKey('task_mgr')} title="Task Manager / Activity Monitor">
-            <Activity size={14} />
-          </ToolBtn>
-          <ToolBtn
-            onClick={() => {
-              const dc = dcRef.current
-              if (dc?.readyState === 'open') dc.send(JSON.stringify({ type: 'screenshot' }))
-            }}
-            title="Capture remote screenshot"
-          >
-            <Camera size={14} />
-          </ToolBtn>
+          {/* Remote actions dropdown */}
+          <div className="relative">
+            <ToolBtn onClick={() => setShowActionsMenu((v) => !v)} title="Remote actions" active={showActionsMenu}>
+              <Activity size={14} />
+            </ToolBtn>
+            {showActionsMenu && (
+              <div className="absolute top-full right-0 mt-1 bg-surface border border-surface-border rounded-lg shadow-xl z-30 py-1 min-w-[160px]">
+                <button
+                  onClick={() => { sendSpecialKey('lock'); setShowActionsMenu(false) }}
+                  className="w-full flex items-center gap-2.5 px-3 py-1.5 text-xs text-slate-300 hover:bg-surface-elevated transition-colors"
+                >
+                  <Lock size={12} /> Lock Screen
+                </button>
+                <button
+                  onClick={() => { sendSpecialKey('task_mgr'); setShowActionsMenu(false) }}
+                  className="w-full flex items-center gap-2.5 px-3 py-1.5 text-xs text-slate-300 hover:bg-surface-elevated transition-colors"
+                >
+                  <Activity size={12} /> Task Manager
+                </button>
+                <button
+                  onClick={() => {
+                    const dc = dcRef.current
+                    if (dc?.readyState === 'open') dc.send(JSON.stringify({ type: 'screenshot' }))
+                    setShowActionsMenu(false)
+                  }}
+                  className="w-full flex items-center gap-2.5 px-3 py-1.5 text-xs text-slate-300 hover:bg-surface-elevated transition-colors"
+                >
+                  <Camera size={12} /> Screenshot
+                </button>
+              </div>
+            )}
+          </div>
 
           <ToolBtn onClick={() => setChatOpen((v) => !v)} title="Chat" active={chatOpen}>
             <MessageSquare size={14} />
