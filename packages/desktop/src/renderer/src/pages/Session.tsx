@@ -6,7 +6,7 @@ import RemoteDisplay from '../components/RemoteDisplay'
 import {
   Maximize2, Minimize2, ZoomIn, ZoomOut, Expand, Shrink,
   Clipboard, X, Monitor, MessageSquare, Send, Tv2,
-  Upload, Download, Mic, MicOff, Lock, Activity, Camera, Circle, Gauge, Crosshair, HelpCircle, Moon, Power, Keyboard
+  Upload, Download, Mic, MicOff, Lock, Activity, Camera, Circle, Gauge, Crosshair, HelpCircle, Moon, Power, Keyboard, RefreshCw
 } from 'lucide-react'
 
 interface Props {
@@ -1390,7 +1390,7 @@ export default function Session({ peerId, role, onEnd }: Props) {
                   }}
                   className="w-full flex items-center gap-2.5 px-3 py-1.5 text-xs text-slate-300 hover:bg-surface-elevated transition-colors"
                 >
-                  <Activity size={12} /> Restart Capture
+                  <RefreshCw size={12} /> Restart Capture
                 </button>
                 <div className="border-t border-surface-border my-1" />
                 <button

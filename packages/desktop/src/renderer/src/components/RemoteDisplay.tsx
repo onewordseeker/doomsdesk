@@ -443,8 +443,14 @@ export default function RemoteDisplay({ framesChannel, dataChannel, remoteScreen
       {!hasFrames && connState !== 'failed' && connState !== 'disconnected' && (
         <div className="absolute inset-0 flex flex-col items-center justify-center gap-3 text-slate-500">
           <div className="w-12 h-12 border-2 border-slate-600 border-t-brand rounded-full animate-spin" />
-          <span className="text-sm">Connecting…</span>
-          <span className="text-xs text-slate-600">Waiting for screen stream from remote device</span>
+          <span className="text-sm">
+            {connState === 'connected' ? 'Loading screen…' : 'Connecting…'}
+          </span>
+          <span className="text-xs text-slate-600">
+            {connState === 'connected'
+              ? 'Waiting for screen stream from remote device'
+              : 'Establishing secure connection'}
+          </span>
         </div>
       )}
 
