@@ -6,7 +6,7 @@ import RemoteDisplay from '../components/RemoteDisplay'
 import {
   Maximize2, Minimize2, ZoomIn, ZoomOut, Expand, Shrink,
   Clipboard, X, Monitor, MessageSquare, Send, Tv2,
-  Upload, Download, Mic, MicOff, Lock, Activity, Camera, Circle
+  Upload, Download, Mic, MicOff, Lock, Activity, Camera, Circle, Gauge
 } from 'lucide-react'
 
 interface Props {
@@ -83,6 +83,7 @@ export default function Session({ peerId, role, onEnd }: Props) {
   const [recording, setRecording] = useState(false)
   const [peerRtt, setPeerRtt] = useState<number | null>(null)
   const [showActionsMenu, setShowActionsMenu] = useState(false)
+  const [qualityPreset, setQualityPreset] = useState<'auto' | 'lan' | 'wan' | 'low'>('auto')
   const [remoteAudioEl] = useState(() => {
     const el = document.createElement('audio')
     el.autoplay = true
@@ -214,6 +215,7 @@ export default function Session({ peerId, role, onEnd }: Props) {
     let framesSent = 0
     let framesSkipped = 0
     let currentBps = 4_000_000
+    let qualityPinBps = 0          // 0 = adaptive; >0 = fixed bitrate
     let stableWindows = 0
     let consecutiveErrors = 0
     let captureRestarting = false
@@ -357,6 +359,16 @@ export default function Session({ peerId, role, onEnd }: Props) {
             }
             sendChunk()
           }).catch((e) => diag(`screenshot err: ${e}`))
+        } else if (msg.type === 'set_quality') {
+          const presetBps: Record<string, number> = { lan: 16_000_000, wan: 4_000_000, low: 2_000_000 }
+          qualityPinBps = presetBps[msg.preset as string] ?? 0
+          if (qualityPinBps > 0) {
+            currentBps = qualityPinBps
+            invoke('set_capture_bitrate', { bps: currentBps }).catch(() => {})
+            diag(`quality preset: ${msg.preset} (${(qualityPinBps / 1e6).toFixed(0)} Mbps fixed)`)
+          } else {
+            diag('quality preset: auto (adaptive)')
+          }
         } else if (msg.type === 'ping') {
           if (inputDc.readyState === 'open') inputDc.send(JSON.stringify({ type: 'pong', t: msg.t }))
         } else if (msg.type === 'chat') {
@@ -399,7 +411,14 @@ export default function Session({ peerId, role, onEnd }: Props) {
       const mbps = (currentBps / 1_000_000).toFixed(1)
       diag(`sent=${framesSent} skip=${framesSkipped} skip%=${Math.round(skipRate * 100)} bps=${mbps}M`)
 
-      if (skipRate > 0.05) {
+      if (qualityPinBps > 0) {
+        // Fixed quality preset — pin bitrate, skip adaptive logic
+        if (currentBps !== qualityPinBps) {
+          currentBps = qualityPinBps
+          invoke('set_capture_bitrate', { bps: currentBps }).catch(() => {})
+          diag(`bitrate pinned ${(currentBps / 1_000_000).toFixed(1)} Mbps`)
+        }
+      } else if (skipRate > 0.05) {
         const factor = skipRate > 0.5 ? 0.5 : skipRate > 0.2 ? 0.7 : 0.85
         currentBps = Math.max(2_000_000, Math.round(currentBps * factor))
         invoke('set_capture_bitrate', { bps: currentBps }).catch(() => {})
@@ -779,6 +798,12 @@ export default function Session({ peerId, role, onEnd }: Props) {
     if (dc?.readyState === 'open') dc.send(JSON.stringify({ type: 'send_keys', combo }))
   }
 
+  function applyQualityPreset(preset: typeof qualityPreset) {
+    setQualityPreset(preset)
+    const dc = dcRef.current
+    if (dc?.readyState === 'open') dc.send(JSON.stringify({ type: 'set_quality', preset }))
+  }
+
   function pickAndSendFile() {
     const input = document.createElement('input')
     input.type = 'file'
@@ -901,6 +926,24 @@ export default function Session({ peerId, role, onEnd }: Props) {
             {DISPLAY_PRESETS.map((p) => (
               <option key={p.label} value={p.label}>{p.label}</option>
             ))}
+          </select>
+
+          <div className="w-px h-4 bg-surface-border mx-1" />
+
+          {/* Quality preset */}
+          <span title="Stream quality" className="text-slate-500 shrink-0">
+            <Gauge size={14} />
+          </span>
+          <select
+            value={qualityPreset}
+            onChange={(e) => applyQualityPreset(e.target.value as typeof qualityPreset)}
+            title="Stream quality preset"
+            className="text-xs bg-surface text-slate-300 border border-surface-border rounded px-1.5 py-0.5 cursor-pointer"
+          >
+            <option value="auto">Auto</option>
+            <option value="lan">LAN (16 Mbps)</option>
+            <option value="wan">WAN (4 Mbps)</option>
+            <option value="low">Low (2 Mbps)</option>
           </select>
 
           <div className="w-px h-4 bg-surface-border mx-1" />
