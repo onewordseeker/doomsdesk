@@ -414,22 +414,30 @@ mod platform {
 #[cfg(target_os = "windows")]
 mod platform {
     use super::EncodedFrame;
+    use openh264::OpenH264API;
+    use openh264::encoder::{Encoder as OH264Encoder, EncoderConfig, FrameType};
+    use openh264::formats::YUVBuffer;
 
     pub struct Encoder {
-        enc: openh264::encoder::Encoder,
+        enc: OH264Encoder,
         width: u32,
         height: u32,
         current_bps: u32,
     }
 
+    fn make_encoder(width: u32, height: u32, bps: u32) -> Option<OH264Encoder> {
+        let api = OpenH264API::from_source();
+        let cfg = EncoderConfig::new(width, height)
+            .set_bitrate_bps(bps)
+            .max_frame_rate(30.0);
+        OH264Encoder::with_config(api, cfg).ok()
+    }
+
     impl Encoder {
         pub fn new(width: u32, height: u32) -> Option<Self> {
-            let bps = ((width as u32 * height as u32 * 4_000_000) / (1920 * 1080))
-                .clamp(500_000, 8_000_000);
-            let cfg = openh264::encoder::EncoderConfig::new(width, height)
-                .bitrate(openh264::Bitrate::Bps(bps))
-                .max_frame_rate(30.0);
-            let enc = openh264::encoder::Encoder::with_config(cfg).ok()?;
+            let bps = ((width as u64 * height as u64 * 4_000_000) / (1920 * 1080))
+                .clamp(500_000, 8_000_000) as u32;
+            let enc = make_encoder(width, height, bps)?;
             Some(Self { enc, width, height, current_bps: bps })
         }
 
@@ -439,37 +447,20 @@ mod platform {
                 .flat_map(|p| [p[0], p[1], p[2]])
                 .collect();
 
-            let yuv = openh264::formats::YUVBuffer::with_rgb(
-                width as usize,
-                height as usize,
-                &rgb,
-            );
-
+            let yuv = YUVBuffer::with_rgb(width as usize, height as usize, &rgb);
             let bs = self.enc.encode(&yuv).ok()?;
 
+            let is_key = matches!(bs.frame_type(), FrameType::IDR | FrameType::I);
             let mut out = Vec::<u8>::new();
-            let mut is_key = false;
-            for nalu in bs.iter_nal() {
-                let bytes = nalu.bytes();
-                if !bytes.is_empty() {
-                    let nal_type = bytes[0] & 0x1f;
-                    if nal_type == 5 || nal_type == 7 { is_key = true; }
-                    out.extend_from_slice(&[0, 0, 0, 1]);
-                    out.extend_from_slice(bytes);
-                }
-            }
+            bs.write_vec(&mut out);
 
             if out.is_empty() { None } else { Some(EncodedFrame { data: out, is_key }) }
         }
 
         pub fn set_bitrate(&mut self, bps: u32) {
-            // openh264 doesn't support live bitrate changes — recreate encoder
             let clamped = bps.clamp(500_000, 8_000_000);
             if clamped == self.current_bps { return; }
-            let cfg = openh264::encoder::EncoderConfig::new(self.width, self.height)
-                .bitrate(openh264::Bitrate::Bps(clamped))
-                .max_frame_rate(30.0);
-            if let Ok(enc) = openh264::encoder::Encoder::with_config(cfg) {
+            if let Some(enc) = make_encoder(self.width, self.height, clamped) {
                 self.enc = enc;
                 self.current_bps = clamped;
             }
