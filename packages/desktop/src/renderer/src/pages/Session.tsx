@@ -51,6 +51,7 @@ export default function Session({ peerId, role, onEnd }: Props) {
   const [sessionDuration, setSessionDuration] = useState(0)
   const [diagLines, setDiagLines] = useState<string[]>([])
   const [showDiag, setShowDiag] = useState(true)
+  const [renderStats, setRenderStats] = useState<{ fps: number; decodeMs: number } | null>(null)
 
   const pcRef = useRef<RTCPeerConnection | null>(null)
   const dcRef = useRef<RTCDataChannel | null>(null)
@@ -180,6 +181,13 @@ export default function Session({ peerId, role, onEnd }: Props) {
           invoke('inject_input', { event: { type: 'set_display_resolution', width, height } })
         } else if (msg.type === 'restart_capture') {
           doRestartCapture('restart_capture from controller')
+        } else if (msg.type === 'request_clipboard') {
+          // Controller is asking for the agent's current clipboard
+          navigator.clipboard.readText().then((text) => {
+            if (inputDc.readyState === 'open') {
+              inputDc.send(JSON.stringify({ type: 'agent_clipboard', text }))
+            }
+          }).catch(() => {})
         } else {
           invoke('inject_input', { event: msg })
         }
@@ -305,6 +313,11 @@ export default function Session({ peerId, role, onEnd }: Props) {
             if (msg.type === 'screen_info') {
               diag(`screen_info: ${msg.width}x${msg.height}`)
               setRemoteScreenSize({ width: msg.width, height: msg.height })
+            } else if (msg.type === 'agent_clipboard') {
+              navigator.clipboard.writeText(msg.text ?? '').catch(() => {})
+              diag(`remote clipboard pulled (${(msg.text ?? '').length} chars)`)
+            } else if (msg.type === 'stats') {
+              setRenderStats({ fps: msg.fps, decodeMs: msg.decodeMs })
             }
           } catch {}
         }
@@ -443,6 +456,11 @@ export default function Session({ peerId, role, onEnd }: Props) {
           </div>
           <span className="text-xs text-slate-600">·</span>
           <span className="text-xs text-slate-500 font-mono">{formatDuration(sessionDuration)}</span>
+          {renderStats && (
+            <span className="text-xs font-mono text-slate-500 tabular-nums">
+              {renderStats.fps.toFixed(0)} fps · {renderStats.decodeMs} ms
+            </span>
+          )}
           <span className="text-xs px-1.5 py-0.5 rounded bg-surface text-slate-400">Controller</span>
         </div>
 
@@ -498,9 +516,20 @@ export default function Session({ peerId, role, onEnd }: Props) {
                 }
               })
             }
-            title="Paste clipboard to remote"
+            title="Push local clipboard → remote"
           >
             <Clipboard size={14} />
+          </ToolBtn>
+          <ToolBtn
+            onClick={() => {
+              const dc = dcRef.current
+              if (dc?.readyState === 'open') {
+                dc.send(JSON.stringify({ type: 'request_clipboard' }))
+              }
+            }}
+            title="Pull remote clipboard → local"
+          >
+            <Clipboard size={14} style={{ transform: 'scaleX(-1)' }} />
           </ToolBtn>
 
           <div className="w-px h-4 bg-surface-border mx-1" />

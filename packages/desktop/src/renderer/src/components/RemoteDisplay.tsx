@@ -29,16 +29,33 @@ export default function RemoteDisplay({ framesChannel, dataChannel, remoteScreen
 
     let lastFrameAt = 0
     let hasReceivedFrame = false
+    let frameCount = 0
+    let lastFpsLog = performance.now()
+    let decodedMs = 0 // rolling avg decode time (recv→draw)
 
     // Resize canvas to match decoded frame on first frame / resolution change
     const decoder = new VideoDecoder({
       output: (frame) => {
+        const drawStart = performance.now()
         if (canvas.width !== frame.displayWidth || canvas.height !== frame.displayHeight) {
           canvas.width  = frame.displayWidth
           canvas.height = frame.displayHeight
         }
         ctx.drawImage(frame, 0, 0)
         frame.close()
+        // Rolling avg of render latency
+        decodedMs = decodedMs * 0.9 + (performance.now() - drawStart) * 0.1
+        frameCount++
+        const now = performance.now()
+        if (now - lastFpsLog > 3000) {
+          const fps = (frameCount / ((now - lastFpsLog) / 1000)).toFixed(1)
+          const dc = dcRef.current
+          if (dc?.readyState === 'open') {
+            dc.send(JSON.stringify({ type: 'stats', fps: parseFloat(fps), decodeMs: Math.round(decodedMs) }))
+          }
+          frameCount = 0
+          lastFpsLog = now
+        }
       },
       error: (err) => {
         console.warn('[VideoDecoder] error — resetting:', err)

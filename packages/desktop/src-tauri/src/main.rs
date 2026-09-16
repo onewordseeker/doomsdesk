@@ -1,6 +1,7 @@
 // Prevents additional console window on Windows in release
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod capture;
 mod config;
 mod encode;
 mod input;
@@ -181,8 +182,7 @@ fn forward_agent_log(app: AppHandle, msg: String) {
 
 #[tauri::command]
 async fn start_native_capture(app: AppHandle, state: State<'_, AppState>) -> Result<(), String> {
-    use screenshots::Screen;
-    use screenshots::image::{DynamicImage, imageops::FilterType};
+    use screenshots::image::{DynamicImage, imageops::FilterType, RgbaImage};
     use base64::Engine;
 
     let gen_ref     = state.capture_generation.clone();
@@ -195,10 +195,10 @@ async fn start_native_capture(app: AppHandle, state: State<'_, AppState>) -> Res
         let mut encoder: Option<encode::H264Encoder> = None;
         let mut pts_ms: u64 = 0;
         let mut last_frame_hash: u64 = 0;
-        let mut last_send_ms: u64 = 0;       // timestamp of last emitted frame
+        let mut last_send_ms: u64 = 0;
         let mut last_bitrate: u32 = 0;
-        const FRAME_MS: u64 = 33;            // ~30 fps target
-        const IDLE_FORCE_MS: u64 = 2_000;   // keepalive: force send every 2s even if static
+        const FRAME_MS: u64 = 33;          // ~30 fps
+        const IDLE_FORCE_MS: u64 = 2_000;  // keepalive: force send every 2s even if static
 
         loop {
             if gen_ref.load(Ordering::SeqCst) != my_gen { break; }
@@ -206,22 +206,24 @@ async fn start_native_capture(app: AppHandle, state: State<'_, AppState>) -> Res
             let frame_start = std::time::Instant::now();
 
             let ok = (|| -> Option<()> {
-                let screens = Screen::all().ok()?;
-                let screen = screens.first()?;
-                let captured = screen.capture().ok()?;
+                // capture::capture_screen() uses CGDisplayCreateImage on macOS (CoreGraphics,
+                // not deprecated) and the screenshots crate on Windows.
+                let frame = capture::capture_screen()?;
+                let (w, h) = (frame.width, frame.height);
 
-                let w = captured.width();
-                let h = captured.height();
-                let dyn_img = DynamicImage::ImageRgba8(captured);
+                // Build DynamicImage for resize — reuse the Vec<u8> allocation
+                let rgba_img = RgbaImage::from_raw(w, h, frame.data)?;
+                let dyn_img = DynamicImage::ImageRgba8(rgba_img);
 
-                // Cap at 1920 px wide
-                let (dyn_img, eff_w, eff_h) = if w > 1920 {
+                // Cap at 1920 px wide — full HD ceiling, limits bandwidth
+                let (eff_w, eff_h, rgba) = if w > 1920 {
                     let eff_h = (h as f64 * 1920.0 / w as f64) as u32;
-                    let img = dyn_img.resize(1920, eff_h, FilterType::Triangle);
-                    let (iw, ih) = (img.width(), img.height());
-                    (img, iw, ih)
+                    let resized = dyn_img.resize(1920, eff_h, FilterType::Triangle);
+                    let iw = resized.width();
+                    let ih = resized.height();
+                    (iw, ih, resized.into_rgba8().into_raw())
                 } else {
-                    (dyn_img, w, h)
+                    (w, h, dyn_img.into_rgba8().into_raw())
                 };
 
                 // (Re)create encoder on dimension change
@@ -233,16 +235,14 @@ async fn start_native_capture(app: AppHandle, state: State<'_, AppState>) -> Res
                 }
                 let enc = encoder.as_mut()?;
 
-                // Live bitrate adaptation — VT accepts property updates without session restart
+                // Live bitrate adaptation — VT accepts updates without session restart
                 let wanted_bps = bitrate_ref.load(Ordering::Relaxed);
                 if wanted_bps != last_bitrate && wanted_bps > 0 {
                     enc.set_bitrate(wanted_bps);
                     last_bitrate = wanted_bps;
                 }
 
-                let rgba = dyn_img.into_rgba8().into_raw();
-
-                // Cheap perceptual hash — sample every 512th byte (128 pixels), XOR into u64
+                // Cheap perceptual hash — sample every 512th byte, LCG-mix with index
                 let hash: u64 = rgba
                     .chunks_exact(512)
                     .enumerate()
@@ -253,19 +253,15 @@ async fn start_native_capture(app: AppHandle, state: State<'_, AppState>) -> Res
                     });
 
                 let idle_too_long = pts_ms.saturating_sub(last_send_ms) >= IDLE_FORCE_MS;
-                let content_changed = hash != last_frame_hash;
-
-                if !content_changed && !idle_too_long {
-                    // Screen is static and keepalive not due — skip encode
-                    return Some(());
+                if hash == last_frame_hash && !idle_too_long {
+                    return Some(()); // static screen, keepalive not due
                 }
-
                 last_frame_hash = hash;
 
-                let frame = enc.encode(&rgba, pts_ms)?;
+                let encoded = enc.encode(&rgba, pts_ms)?;
                 last_send_ms = pts_ms;
 
-                let b64 = base64::engine::general_purpose::STANDARD.encode(&frame.data);
+                let b64 = base64::engine::general_purpose::STANDARD.encode(&encoded.data);
                 let _ = app.emit("screen-frame", b64);
                 Some(())
             })();

@@ -361,7 +361,7 @@ export default function Home() {
                                 {formatId(device.id)}
                               </span>
                               {device.savedPassword && (
-                                <Lock size={10} className="text-brand shrink-0" title="Password saved" />
+                                <span title="Password saved"><Lock size={10} className="text-brand shrink-0" /></span>
                               )}
                             </div>
                             <span className="text-xs text-slate-600">{formatTimeAgo(device.lastConnected)}</span>
