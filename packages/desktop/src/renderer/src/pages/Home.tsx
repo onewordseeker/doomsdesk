@@ -290,9 +290,18 @@ export default function Home() {
                     <input
                       type="text"
                       value={connectId}
-                      onChange={(e) => setConnectId(e.target.value)}
+                      onChange={(e) => {
+                        // Auto-format: keep only digits, insert dashes at positions 3 and 7
+                        const digits = e.target.value.replace(/\D/g, '').slice(0, 9)
+                        const formatted = digits.length > 6
+                          ? `${digits.slice(0, 3)}-${digits.slice(3, 6)}-${digits.slice(6)}`
+                          : digits.length > 3
+                          ? `${digits.slice(0, 3)}-${digits.slice(3)}`
+                          : digits
+                        setConnectId(formatted)
+                      }}
                       onKeyDown={(e) => e.key === 'Enter' && handleConnect()}
-                      placeholder="Device ID  (e.g. 123 456 789)"
+                      placeholder="123-456-789"
                       className="w-full bg-surface border border-surface-border rounded-xl px-4 py-3 text-white font-mono text-lg tracking-wider placeholder:text-slate-600 focus:outline-none focus:border-brand transition-colors"
                     />
                     <input
@@ -325,20 +334,23 @@ export default function Home() {
                       </span>
                     </label>
 
-                    <button
-                      onClick={() => handleConnect()}
-                      disabled={connecting || !connectId.trim() || !serverOnline}
-                      className="w-full bg-brand hover:bg-brand-hover disabled:opacity-40 disabled:cursor-not-allowed text-white font-semibold rounded-xl py-3 transition-colors flex items-center justify-center gap-2"
-                    >
-                      {connecting ? (
-                        <>
-                          <RefreshCw size={16} className="animate-spin" />
-                          Connecting…
-                        </>
-                      ) : (
-                        'Connect'
-                      )}
-                    </button>
+                    {connecting ? (
+                      <button
+                        onClick={() => setConnecting(false)}
+                        className="w-full bg-surface border border-surface-border hover:border-slate-500 text-slate-300 font-semibold rounded-xl py-3 transition-colors flex items-center justify-center gap-2"
+                      >
+                        <RefreshCw size={16} className="animate-spin text-brand" />
+                        Connecting… (click to cancel)
+                      </button>
+                    ) : (
+                      <button
+                        onClick={() => handleConnect()}
+                        disabled={!connectId.trim() || !serverOnline}
+                        className="w-full bg-brand hover:bg-brand-hover disabled:opacity-40 disabled:cursor-not-allowed text-white font-semibold rounded-xl py-3 transition-colors"
+                      >
+                        Connect
+                      </button>
+                    )}
 
                     {connectError && (
                       <p className="text-xs text-center text-red-400">{connectError}</p>
