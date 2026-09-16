@@ -230,7 +230,7 @@ pub fn create_agent_window(app: &AppHandle, peer_id: &str) {
     .inner_size(320.0, 72.0)
     .decorations(false)
     .skip_taskbar(false)
-    .resizable(false)
+    .resizable(true)
     .always_on_top(true)
     .visible(true)
     .focused(false)

@@ -123,6 +123,12 @@ export default function Session({ peerId, role, onEnd }: Props) {
     chatEndRef.current?.scrollIntoView({ behavior: 'smooth' })
   }, [chatMessages])
 
+  // Resize agent banner window when chat panel opens/closes
+  useEffect(() => {
+    if (role !== 'agent') return
+    invoke('resize_agent_window', { height: chatOpen ? 268 : 72 }).catch(() => {})
+  }, [role, chatOpen])
+
   const diagEndRef = useRef<HTMLDivElement>(null)
   const chatEndRef = useRef<HTMLDivElement>(null)
   const pcRef = useRef<RTCPeerConnection | null>(null)

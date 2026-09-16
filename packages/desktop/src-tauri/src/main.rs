@@ -242,6 +242,18 @@ async fn save_received_file(app: AppHandle, name: String, data: Vec<u8>) -> Resu
     Ok(())
 }
 
+/// Resize the agent-banner window height (used when chat panel opens/closes).
+#[tauri::command]
+fn resize_agent_window(app: AppHandle, height: u32) {
+    if let Some(win) = app.get_webview_window("agent-banner") {
+        if let Ok(sf) = win.scale_factor() {
+            let physical_h = (height as f64 * sf) as u32;
+            let physical_w = (320.0 * sf) as u32;
+            let _ = win.set_size(tauri::PhysicalSize::new(physical_w, physical_h));
+        }
+    }
+}
+
 /// Update the system tray tooltip (e.g., to show active session count).
 #[tauri::command]
 fn update_tray_tooltip(tooltip: String) {
@@ -646,6 +658,7 @@ fn main() {
             set_launch_on_startup,
             get_launch_on_startup,
             update_tray_tooltip,
+            resize_agent_window,
         ])
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
