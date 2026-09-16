@@ -749,8 +749,9 @@ export default function Session({ peerId, role, onEnd }: Props) {
 
     switch (msg.type) {
       case 'offer':
-        if (role === 'controller') {
-          diag('got offer → creating answer')
+        // Both roles can receive offers: agent→controller (initial), controller→agent (ICE restart / mic renegotiation)
+        diag('got offer → creating answer')
+        try {
           await pc.setRemoteDescription({ type: 'offer', sdp: msg.sdp as string })
           const answer = await pc.createAnswer()
           await pc.setLocalDescription(answer)
@@ -758,13 +759,14 @@ export default function Session({ peerId, role, onEnd }: Props) {
             msg: { type: 'answer', targetId: peerId, sdp: answer.sdp },
           })
           diag('answer sent')
-        }
+        } catch (e) { diag(`offer/answer err: ${e}`) }
         break
       case 'answer':
-        if (role === 'agent') {
-          diag('got answer → setRemoteDesc')
+        // Both roles can receive answers: agent→controller (initial reply), controller→agent (after ICE restart answer)
+        diag('got answer → setRemoteDesc')
+        try {
           await pc.setRemoteDescription({ type: 'answer', sdp: msg.sdp as string })
-        }
+        } catch (e) { diag(`setRemoteDesc answer err: ${e}`) }
         break
       case 'ice': {
         if (msg.candidate) {
