@@ -1001,7 +1001,7 @@ dependencies = [
 
 [[package]]
 name = "doomsdesk"
-version = "0.1.0"
+version = "1.9.0"
 dependencies = [
  "auto-launch",
  "base64 0.22.1",

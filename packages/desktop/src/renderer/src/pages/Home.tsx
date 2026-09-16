@@ -515,8 +515,10 @@ function SettingsOverlay({ onClose }: { onClose: () => void }) {
   const [turnUsername, setTurnUsername] = useState('')
   const [turnCredential, setTurnCredential] = useState('')
   const [showAdvanced, setShowAdvanced] = useState(false)
+  const [appVersion, setAppVersion] = useState('')
 
   useEffect(() => {
+    import('@tauri-apps/api/app').then(({ getVersion }) => getVersion().then(setAppVersion).catch(() => {}))
     Promise.all([
       invoke<Record<string, unknown>>('get_config'),
       invoke<boolean>('get_launch_on_startup'),
@@ -639,6 +641,11 @@ function SettingsOverlay({ onClose }: { onClose: () => void }) {
             Device ID:{' '}
             <span className="text-slate-400 font-mono">{config.deviceId as string}</span>
           </p>
+          {appVersion && (
+            <p className="text-xs text-slate-700">
+              DoomsDesk v{appVersion}
+            </p>
+          )}
           <div className="flex gap-2 pt-2">
             <button
               onClick={onClose}

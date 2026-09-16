@@ -83,7 +83,7 @@ export default function Session({ peerId, role, onEnd }: Props) {
   const [sessionDuration, setSessionDuration] = useState(0)
   const [diagLines, setDiagLines] = useState<string[]>([])
   const [showDiag, setShowDiag] = useState(true)
-  const [renderStats, setRenderStats] = useState<{ fps: number; decodeMs: number; bps?: number } | null>(null)
+  const [renderStats, setRenderStats] = useState<{ fps: number; decodeMs: number; bps?: number; skipPct?: number } | null>(null)
   const [chatOpen, setChatOpen] = useState(false)
   const [chatMessages, setChatMessages] = useState<Array<{ from: 'me' | 'them'; text: string; ts: number }>>([])
   const [chatInput, setChatInput] = useState('')
@@ -542,15 +542,29 @@ export default function Session({ peerId, role, onEnd }: Props) {
       } else {
         stableWindows = 0
       }
-      // Inform controller of current bitrate
+      // Inform controller of current bitrate and skip rate (network quality proxy)
       const d = dcRef.current
       if (d?.readyState === 'open') {
-        d.send(JSON.stringify({ type: 'bitrate_info', bps: currentBps }))
+        d.send(JSON.stringify({ type: 'bitrate_info', bps: currentBps, skipPct: Math.round(skipRate * 100) }))
       }
       framesSent = 0
       framesSkipped = 0
     }, 3000)
     agentCleanups.push(() => clearInterval(bitrateInterval))
+
+    // Auto-sync clipboard: push remote clipboard to controller whenever it changes
+    let lastClipboard = ''
+    const clipSyncInterval = setInterval(async () => {
+      try {
+        const text = await navigator.clipboard.readText()
+        if (text && text !== lastClipboard) {
+          lastClipboard = text
+          const d = dcRef.current
+          if (d?.readyState === 'open') d.send(JSON.stringify({ type: 'agent_clipboard', text }))
+        }
+      } catch {}
+    }, 2500)
+    agentCleanups.push(() => clearInterval(clipSyncInterval))
 
     const errUnsub = await listen<string>('screen-frame-error', () => {
       framesSkipped++
@@ -625,7 +639,9 @@ export default function Session({ peerId, role, onEnd }: Props) {
             } else if (msg.type === 'stats') {
               setRenderStats((prev) => ({ ...prev, fps: msg.fps, decodeMs: msg.decodeMs }))
             } else if (msg.type === 'bitrate_info') {
-              setRenderStats((prev) => prev ? { ...prev, bps: msg.bps } : { fps: 0, decodeMs: 0, bps: msg.bps })
+              setRenderStats((prev) => prev
+                ? { ...prev, bps: msg.bps, skipPct: msg.skipPct }
+                : { fps: 0, decodeMs: 0, bps: msg.bps, skipPct: msg.skipPct })
             } else if (msg.type === 'pong') {
               if (msg.t) setPeerRtt(Date.now() - msg.t)
             } else if (msg.type === 'chat') {
@@ -1111,6 +1127,19 @@ export default function Session({ peerId, role, onEnd }: Props) {
               {renderStats.fps?.toFixed(0) ?? 0} fps · {renderStats.decodeMs ?? 0} ms
               {renderStats.bps != null && ` · ${(renderStats.bps / 1_000_000).toFixed(1)}M`}
               {peerRtt !== null && ` · ${peerRtt}ms`}
+            </span>
+          )}
+          {/* Network quality warning when skip rate or RTT is high */}
+          {((renderStats?.skipPct ?? 0) > 15 || (peerRtt ?? 0) > 200) && connState === 'connected' && (
+            <span
+              className={`text-xs px-1.5 py-0.5 rounded font-mono ${
+                (renderStats?.skipPct ?? 0) > 40 || (peerRtt ?? 0) > 400
+                  ? 'bg-red-900/40 text-red-400'
+                  : 'bg-amber-900/40 text-amber-400'
+              }`}
+              title={`Network congestion: ${renderStats?.skipPct ?? 0}% frame drop, ${peerRtt ?? 0}ms RTT`}
+            >
+              ⚠ Poor
             </span>
           )}
           {iceType && (

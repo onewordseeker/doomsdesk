@@ -292,12 +292,15 @@ fn open_privacy_settings(pane: String) -> Result<(), String> {
 }
 
 /// Resize the agent-banner window height (used when chat panel opens/closes).
+/// Preserves the current width so user resizes are respected.
 #[tauri::command]
 fn resize_agent_window(app: AppHandle, height: u32) {
     if let Some(win) = app.get_webview_window("agent-banner") {
         if let Ok(sf) = win.scale_factor() {
             let physical_h = (height as f64 * sf) as u32;
-            let physical_w = (320.0 * sf) as u32;
+            let physical_w = win.inner_size()
+                .map(|s| s.width)
+                .unwrap_or((320.0 * sf) as u32);
             let _ = win.set_size(tauri::PhysicalSize::new(physical_w, physical_h));
         }
     }
