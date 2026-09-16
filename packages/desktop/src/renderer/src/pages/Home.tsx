@@ -57,6 +57,12 @@ export default function Home() {
   const [serverRtt, setServerRtt] = useState<number | null>(null)
   const [webUrl, setWebUrl] = useState('https://doomsdesk.hamidentifier.cloud')
   const [perms, setPerms] = useState<{ accessibility: boolean; screenRecording: boolean } | null>(null)
+  const [startMinimized, setStartMinimized] = useState(false)
+  const [trayHintDismissed, setTrayHintDismissed] = useState(false)
+  // Wake-on-LAN state
+  const [wolMac, setWolMac] = useState('')
+  const [wolLoading, setWolLoading] = useState(false)
+  const [wolResult, setWolResult] = useState<{ ok: boolean; msg: string } | null>(null)
   const pollRef = useRef<ReturnType<typeof setInterval>>()
   const connectTimerRef = useRef<ReturnType<typeof setTimeout>>()
   const autoDenyRef = useRef<ReturnType<typeof setTimeout>>()
@@ -134,7 +140,7 @@ export default function Home() {
       invoke<string>('get_device_id'),
       invoke<string>('get_random_password'),
       invoke<boolean>('is_server_connected'),
-      invoke<{ permanentPassword: string; webUrl?: string }>('get_config'),
+      invoke<{ permanentPassword: string; webUrl?: string; startMinimized?: boolean }>('get_config'),
       invoke<{ accessibility: boolean; screenRecording: boolean }>('check_macos_permissions'),
     ])
     setDeviceId(id)
@@ -142,7 +148,22 @@ export default function Home() {
     setServerOnline(online)
     setPermPw(config.permanentPassword ?? '')
     if (config.webUrl) setWebUrl(config.webUrl)
+    if (config.startMinimized !== undefined) setStartMinimized(!!config.startMinimized)
     setPerms(p)
+  }
+
+  async function handleWol() {
+    if (!wolMac.trim()) return
+    setWolLoading(true)
+    setWolResult(null)
+    try {
+      await invoke('wake_on_lan', { mac: wolMac.trim() })
+      setWolResult({ ok: true, msg: 'Magic packet sent.' })
+    } catch (err) {
+      setWolResult({ ok: false, msg: String(err) })
+    } finally {
+      setWolLoading(false)
+    }
   }
 
   function copy(text: string, type: 'id' | 'pw' | 'invite') {
@@ -262,6 +283,20 @@ export default function Home() {
         </div>
       )}
 
+      {/* System tray hint — shown when startMinimized is enabled */}
+      {startMinimized && !trayHintDismissed && (
+        <div className="px-4 py-2 bg-slate-800/60 border-b border-surface-border text-xs text-slate-400 flex items-center justify-between shrink-0">
+          <span>Starting minimized — the app is available in the system tray.</span>
+          <button
+            onClick={() => setTrayHintDismissed(true)}
+            className="ml-4 text-slate-600 hover:text-slate-300 transition-colors shrink-0"
+            title="Dismiss"
+          >
+            <X size={12} />
+          </button>
+        </div>
+      )}
+
       <div className="flex flex-1 overflow-hidden">
         {/* Left panel — My Device */}
         <div className="w-64 border-r border-surface-border flex flex-col p-5 gap-4 shrink-0">
@@ -273,13 +308,22 @@ export default function Home() {
                   {formatId(deviceId)}
                 </span>
               </div>
-              <button
-                onClick={() => copy(deviceId.replace(/-/g, ''), 'id')}
-                className="flex items-center gap-1.5 text-xs text-slate-400 hover:text-brand transition-colors mt-2"
-              >
-                <Copy size={11} />
-                {copyFeedback === 'id' ? 'Copied!' : 'Copy ID'}
-              </button>
+              <div className="flex items-center gap-3 mt-2">
+                <button
+                  onClick={() => copy(deviceId.replace(/-/g, ''), 'id')}
+                  className="flex items-center gap-1.5 text-xs text-slate-400 hover:text-brand transition-colors"
+                >
+                  <Copy size={11} />
+                  {copyFeedback === 'id' ? 'Copied!' : 'Copy ID'}
+                </button>
+                <button
+                  onClick={() => navigator.clipboard.writeText(`doomsdesk://connect?id=${deviceId}&pw=${randomPw}`)}
+                  className="text-xs text-white/50 hover:text-white/80 transition"
+                  title="Copy connection link"
+                >
+                  Copy link
+                </button>
+              </div>
             </div>
           </div>
 
@@ -443,6 +487,33 @@ export default function Home() {
                     {!serverOnline && (
                       <p className="text-xs text-center text-amber-500">
                         Not connected to server — make sure the server is running
+                      </p>
+                    )}
+                  </div>
+                </div>
+
+                {/* Wake-on-LAN */}
+                <div className="max-w-sm mx-auto mt-6">
+                  <div className="bg-white/5 rounded-xl p-4 space-y-3">
+                    <p className="text-sm font-medium text-white/70">Wake a sleeping device</p>
+                    <div className="flex gap-2">
+                      <input
+                        value={wolMac}
+                        onChange={e => setWolMac(e.target.value)}
+                        placeholder="AA:BB:CC:DD:EE:FF"
+                        className="flex-1 bg-white/10 border border-white/20 rounded-lg px-3 py-2 text-sm text-white placeholder-white/30 focus:outline-none focus:border-white/40"
+                      />
+                      <button
+                        onClick={handleWol}
+                        disabled={wolLoading}
+                        className="px-4 py-2 bg-white/15 hover:bg-white/25 text-white text-sm rounded-lg transition disabled:opacity-50"
+                      >
+                        {wolLoading ? 'Sending…' : 'Wake'}
+                      </button>
+                    </div>
+                    {wolResult && (
+                      <p className={`text-xs ${wolResult.ok ? 'text-green-400' : 'text-red-400'}`}>
+                        {wolResult.msg}
                       </p>
                     )}
                   </div>

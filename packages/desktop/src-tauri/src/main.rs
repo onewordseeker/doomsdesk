@@ -357,6 +357,10 @@ fn set_launch_on_startup(state: State<'_, AppState>, enabled: bool) -> Result<()
     let binary = std::env::current_exe()
         .map(|p| p.to_string_lossy().to_string())
         .map_err(|e| e.to_string())?;
+    // macOS auto-launch 0.5 takes a `hidden: bool` 3rd arg; Windows/Linux do not.
+    #[cfg(target_os = "macos")]
+    let al = auto_launch::AutoLaunch::new("DoomsDesk", &binary, false, &[] as &[&str]);
+    #[cfg(not(target_os = "macos"))]
     let al = auto_launch::AutoLaunch::new("DoomsDesk", &binary, &[] as &[&str]);
     if enabled {
         al.enable().map_err(|e| e.to_string())?;
@@ -375,9 +379,11 @@ fn get_launch_on_startup() -> bool {
     let binary = std::env::current_exe()
         .map(|p| p.to_string_lossy().to_string())
         .unwrap_or_default();
-    auto_launch::AutoLaunch::new("DoomsDesk", &binary, &[] as &[&str])
-        .is_enabled()
-        .unwrap_or(false)
+    #[cfg(target_os = "macos")]
+    let al = auto_launch::AutoLaunch::new("DoomsDesk", &binary, false, &[] as &[&str]);
+    #[cfg(not(target_os = "macos"))]
+    let al = auto_launch::AutoLaunch::new("DoomsDesk", &binary, &[] as &[&str]);
+    al.is_enabled().unwrap_or(false)
 }
 
 /// Returns the list of connected displays.

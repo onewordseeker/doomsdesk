@@ -6,7 +6,7 @@ import RemoteDisplay from '../components/RemoteDisplay'
 import {
   Maximize2, Minimize2, ZoomIn, ZoomOut, Expand, Shrink,
   Clipboard, X, Monitor, MessageSquare, Send, Tv2,
-  Upload, Download, Mic, MicOff, Lock, Activity, Camera, Circle, Gauge, Crosshair, HelpCircle, Moon, Power, Keyboard, RefreshCw
+  Upload, Download, Mic, MicOff, Lock, Activity, Camera, Circle, Gauge, Crosshair, HelpCircle, Moon, Power, Keyboard, RefreshCw, Info
 } from 'lucide-react'
 
 interface Props {
@@ -103,6 +103,8 @@ export default function Session({ peerId, role, onEnd }: Props) {
   const [showShortcuts, setShowShortcuts] = useState(false)
   const [toast, setToast] = useState<string | null>(null)
   const [unreadChat, setUnreadChat] = useState(0)
+  const [sessionStats, setSessionStats] = useState<{ fps: number; decodeMs: number; codec: string } | null>(null)
+  const [showInfoOverlay, setShowInfoOverlay] = useState(false)
   const [remoteAudioEl] = useState(() => {
     const el = document.createElement('audio')
     el.autoplay = true
@@ -195,6 +197,7 @@ export default function Session({ peerId, role, onEnd }: Props) {
   const micStreamRef = useRef<MediaStream | null>(null)
   const micSenderRef = useRef<RTCRtpSender | null>(null)
   const connTimeoutRef = useRef<ReturnType<typeof setTimeout>>()
+  const infoOverlayTimerRef = useRef<ReturnType<typeof setTimeout>>()
 
   function diag(msg: string) {
     const ts = new Date().toISOString().slice(11, 23)
@@ -991,8 +994,24 @@ export default function Session({ peerId, role, onEnd }: Props) {
     if (role !== 'controller') return
     const onKey = (e: KeyboardEvent) => {
       if (e.key === 'F11') { e.preventDefault(); toggleFullscreen() }
+      else if (e.key === 'i' && !e.ctrlKey && !e.metaKey && !e.altKey) {
+        // Toggle session info overlay (only when not typing in an input)
+        const tag = (e.target as HTMLElement)?.tagName
+        if (tag !== 'INPUT' && tag !== 'TEXTAREA') {
+          e.preventDefault()
+          setShowInfoOverlay((v) => {
+            const next = !v
+            clearTimeout(infoOverlayTimerRef.current)
+            if (next) {
+              infoOverlayTimerRef.current = setTimeout(() => setShowInfoOverlay(false), 5000)
+            }
+            return next
+          })
+        }
+      }
       else if (e.key === 'Escape') {
-        setShowActionsMenu(false); setShowShortcuts(false)
+        setShowActionsMenu(false); setShowShortcuts(false); setShowInfoOverlay(false)
+        clearTimeout(infoOverlayTimerRef.current)
         // Also exit fullscreen on Escape
         if (fullscreen) { setFullscreen(false); getCurrentWindow().setFullscreen(false).catch(() => {}); setToolbarHidden(false) }
       }
@@ -1289,6 +1308,19 @@ export default function Session({ peerId, role, onEnd }: Props) {
             <option value="low">Low (2 Mbps)</option>
           </select>
 
+          {sessionStats?.codec && (
+            <span
+              className={`text-xs font-mono px-1.5 py-0.5 rounded select-none ${
+                sessionStats.codec === 'h265'
+                  ? 'bg-green-500/20 text-green-400'
+                  : 'bg-blue-500/20 text-blue-400'
+              }`}
+              title={`Codec in use: ${sessionStats.codec === 'h265' ? 'H.265 / HEVC' : 'H.264 / AVC'}`}
+            >
+              {sessionStats.codec === 'h265' ? 'H.265' : 'H.264'}
+            </span>
+          )}
+
           <div className="w-px h-4 bg-surface-border mx-1" />
 
           <ToolBtn
@@ -1462,6 +1494,23 @@ export default function Session({ peerId, role, onEnd }: Props) {
             <Monitor size={14} />
           </ToolBtn>
 
+          <ToolBtn
+            onClick={() => {
+              setShowInfoOverlay((v) => {
+                const next = !v
+                clearTimeout(infoOverlayTimerRef.current)
+                if (next) {
+                  infoOverlayTimerRef.current = setTimeout(() => setShowInfoOverlay(false), 5000)
+                }
+                return next
+              })
+            }}
+            title="Session info overlay (I)"
+            active={showInfoOverlay}
+          >
+            <Info size={14} />
+          </ToolBtn>
+
           {/* Keyboard shortcuts help */}
           <div className="relative">
             <ToolBtn onClick={() => setShowShortcuts((v) => !v)} title="Keyboard shortcuts" active={showShortcuts}>
@@ -1474,6 +1523,7 @@ export default function Session({ peerId, role, onEnd }: Props) {
                   {[
                     ['F11', 'Toggle fullscreen'],
                     ['Esc', 'Exit fullscreen / close menus'],
+                    ['I', 'Session info overlay'],
                     ['Ctrl/⌘ +', 'Zoom in'],
                     ['Ctrl/⌘ -', 'Zoom out'],
                     ['Ctrl/⌘ 0', 'Reset zoom'],
@@ -1714,7 +1764,47 @@ export default function Session({ peerId, role, onEnd }: Props) {
           pointerLockEnabled={pointerLockEnabled}
           keyPassthrough={keyPassthrough}
           onLocalZoom={(delta) => setZoom((z) => Math.min(3, Math.max(0.5, Math.round((z + delta) * 10) / 10)))}
+          onStats={(s) => {
+            setSessionStats(s)
+            // Reset the auto-hide timer if the overlay is currently visible
+            setShowInfoOverlay((visible) => {
+              if (visible) {
+                clearTimeout(infoOverlayTimerRef.current)
+                infoOverlayTimerRef.current = setTimeout(() => setShowInfoOverlay(false), 5000)
+              }
+              return visible
+            })
+          }}
         />
+
+        {/* Session info overlay — toggled with I key or toolbar button */}
+        {showInfoOverlay && connState === 'connected' && (
+          <div className="absolute bottom-16 left-4 bg-black/75 backdrop-blur-sm text-white text-xs rounded-xl px-3.5 py-2.5 font-mono space-y-1 z-50 border border-white/10 shadow-2xl pointer-events-none">
+            <div className="flex items-center justify-between gap-6">
+              <span className="text-slate-400">Codec</span>
+              <span className={sessionStats?.codec === 'h265' ? 'text-green-400' : 'text-blue-400'}>
+                {sessionStats?.codec?.toUpperCase() ?? '—'}
+              </span>
+            </div>
+            <div className="flex items-center justify-between gap-6">
+              <span className="text-slate-400">FPS</span>
+              <span className="text-white">{sessionStats?.fps != null ? sessionStats.fps.toFixed(1) : '—'}</span>
+            </div>
+            <div className="flex items-center justify-between gap-6">
+              <span className="text-slate-400">Decode</span>
+              <span className="text-white">{sessionStats?.decodeMs != null ? `${sessionStats.decodeMs}ms` : '—'}</span>
+            </div>
+            <div className="flex items-center justify-between gap-6">
+              <span className="text-slate-400">Resolution</span>
+              <span className="text-white">{remoteScreenSize.width}×{remoteScreenSize.height}</span>
+            </div>
+            <div className="flex items-center justify-between gap-6">
+              <span className="text-slate-400">State</span>
+              <span className="text-emerald-400">{connState}</span>
+            </div>
+            <div className="border-t border-white/10 mt-1 pt-1 text-slate-600 text-[10px] text-center">Press I to dismiss</div>
+          </div>
+        )}
       </div>
     </div>
   )

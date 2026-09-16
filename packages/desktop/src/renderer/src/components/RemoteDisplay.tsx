@@ -12,9 +12,10 @@ interface Props {
   pointerLockEnabled?: boolean
   keyPassthrough?: boolean
   onLocalZoom?: (delta: number) => void
+  onStats?: (stats: { fps: number; decodeMs: number; codec: string }) => void
 }
 
-export default function RemoteDisplay({ framesChannel, dataChannel, remoteScreenSize, zoom, stretch, connState, recording, onRecordingChunk, pointerLockEnabled = false, keyPassthrough = true, onLocalZoom }: Props) {
+export default function RemoteDisplay({ framesChannel, dataChannel, remoteScreenSize, zoom, stretch, connState, recording, onRecordingChunk, pointerLockEnabled = false, keyPassthrough = true, onLocalZoom, onStats }: Props) {
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const containerRef = useRef<HTMLDivElement>(null)
   const imeRef = useRef<HTMLTextAreaElement>(null)
@@ -31,6 +32,9 @@ export default function RemoteDisplay({ framesChannel, dataChannel, remoteScreen
   const [pointerLocked, setPointerLocked] = useState(false)
   const recorderRef = useRef<MediaRecorder | null>(null)
   const recChunksRef = useRef<Blob[]>([])
+
+  const onStatsRef = useRef(onStats)
+  useEffect(() => { onStatsRef.current = onStats }, [onStats])
 
   useEffect(() => { dcRef.current = dataChannel }, [dataChannel])
 
@@ -153,10 +157,12 @@ export default function RemoteDisplay({ framesChannel, dataChannel, remoteScreen
         const now = performance.now()
         if (now - lastFpsLog > 3000) {
           const fps = (frameCount / ((now - lastFpsLog) / 1000)).toFixed(1)
+          const statsPayload = { fps: parseFloat(fps), decodeMs: Math.round(decodedMs), codec }
           const dc = dcRef.current
           if (dc?.readyState === 'open') {
-            dc.send(JSON.stringify({ type: 'stats', fps: parseFloat(fps), decodeMs: Math.round(decodedMs), codec }))
+            dc.send(JSON.stringify({ type: 'stats', ...statsPayload }))
           }
+          onStatsRef.current?.(statsPayload)
           frameCount = 0
           lastFpsLog = now
         }
