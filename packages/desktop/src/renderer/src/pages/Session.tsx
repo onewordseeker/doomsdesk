@@ -307,8 +307,22 @@ export default function Session({ peerId, role, onEnd }: Props) {
         } else if (msg.type === 'switch_monitor') {
           const id = (msg as any).displayId as number ?? 0
           diag(`switch monitor → ${id}`)
+          // Just update the display ID — capture loop auto-adapts on next frame,
+          // encoder recreates itself if resolution changes, no pipeline restart needed
           invoke('set_capture_monitor', { displayId: id }).catch(() => {})
-          doRestartCapture(`monitor switch to ${id}`)
+          // Send updated screen_info after a short delay for the new monitor's dimensions
+          setTimeout(async () => {
+            try {
+              const monitors = await invoke<MonitorInfo[]>('list_monitors')
+              const mon = monitors.find((m) => m.id === id) ?? monitors.find((m) => m.isMain) ?? monitors[0]
+              if (mon) {
+                const capW = Math.min(mon.width, 1920)
+                const capH = Math.round(mon.height * (capW / mon.width))
+                const d = dcRef.current
+                if (d?.readyState === 'open') d.send(JSON.stringify({ type: 'screen_info', width: capW, height: capH }))
+              }
+            } catch {}
+          }, 200)
         } else if (msg.type === 'request_clipboard') {
           navigator.clipboard.readText().then((text) => {
             if (inputDc.readyState === 'open') {
