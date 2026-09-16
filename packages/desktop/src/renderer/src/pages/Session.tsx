@@ -32,18 +32,29 @@ interface FileTransfer {
   done: boolean
 }
 
-const ICE_SERVERS: RTCIceServer[] = [
-  { urls: 'stun:stun.l.google.com:19302' },
-  { urls: 'stun:stun1.l.google.com:19302' },
-  {
-    urls: [
-      'turn:72.62.66.94:3478',
-      'turn:72.62.66.94:3478?transport=tcp',
-    ],
-    username: 'doomsdesk',
-    credential: 'turn123',
-  },
-]
+const DEFAULT_TURN: RTCIceServer = {
+  urls: ['turn:72.62.66.94:3478', 'turn:72.62.66.94:3478?transport=tcp'],
+  username: 'doomsdesk',
+  credential: 'turn123',
+}
+
+async function buildIceServers(): Promise<RTCIceServer[]> {
+  const base: RTCIceServer[] = [
+    { urls: 'stun:stun.l.google.com:19302' },
+    { urls: 'stun:stun1.l.google.com:19302' },
+  ]
+  try {
+    const cfg = await invoke<{ turnUrl?: string; turnUsername?: string; turnCredential?: string }>('get_config')
+    if (cfg.turnUrl) {
+      const url = cfg.turnUrl.startsWith('turn:') || cfg.turnUrl.startsWith('turns:')
+        ? cfg.turnUrl : `turn:${cfg.turnUrl}`
+      base.push({ urls: url, username: cfg.turnUsername ?? '', credential: cfg.turnCredential ?? '' })
+      return base
+    }
+  } catch {}
+  base.push(DEFAULT_TURN)
+  return base
+}
 
 const DISPLAY_PRESETS = [
   { label: '1080p (1920×1080)', width: 1920, height: 1080 },
@@ -93,6 +104,14 @@ export default function Session({ peerId, role, onEnd }: Props) {
     el.autoplay = true
     return el
   })
+
+  // Auto-remove completed file transfers 8s after the last one finishes
+  const doneFtIds = fileTransfers.filter((ft) => ft.done).map((ft) => ft.id).join(',')
+  useEffect(() => {
+    if (!doneFtIds) return
+    const t = setTimeout(() => setFileTransfers((prev) => prev.filter((ft) => !ft.done)), 8000)
+    return () => clearTimeout(t)
+  }, [doneFtIds])
 
   const pcRef = useRef<RTCPeerConnection | null>(null)
   const dcRef = useRef<RTCDataChannel | null>(null)
@@ -159,7 +178,8 @@ export default function Session({ peerId, role, onEnd }: Props) {
   }, [])
 
   async function initSession() {
-    const pc = new RTCPeerConnection({ iceServers: ICE_SERVERS })
+    const iceServers = await buildIceServers()
+    const pc = new RTCPeerConnection({ iceServers })
     pcRef.current = pc
 
     // Receive remote audio track (agent's mic)

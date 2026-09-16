@@ -59,6 +59,15 @@ fn set_config(state: State<'_, AppState>, partial: Value) {
     if let Some(v) = partial.get("startMinimized").and_then(|v| v.as_bool()) {
         cfg.start_minimized = v;
     }
+    if let Some(v) = partial.get("turnUrl").and_then(|v| v.as_str()) {
+        cfg.turn_url = if v.is_empty() { None } else { Some(v.to_string()) };
+    }
+    if let Some(v) = partial.get("turnUsername").and_then(|v| v.as_str()) {
+        cfg.turn_username = if v.is_empty() { None } else { Some(v.to_string()) };
+    }
+    if let Some(v) = partial.get("turnCredential").and_then(|v| v.as_str()) {
+        cfg.turn_credential = if v.is_empty() { None } else { Some(v.to_string()) };
+    }
     config::save(&state.config_path.lock().unwrap(), &cfg);
 }
 

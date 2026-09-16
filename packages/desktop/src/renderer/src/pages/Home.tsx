@@ -90,7 +90,18 @@ export default function Home() {
           }
         }
         if (msg.type === 'incoming' && msg.sourceId) {
-          setIncomingConn({ sourceId: msg.sourceId })
+          const sid = msg.sourceId
+          setIncomingConn({ sourceId: sid })
+          // Auto-deny after 60s if the user doesn't respond
+          setTimeout(() => {
+            setIncomingConn((current) => {
+              if (current?.sourceId === sid) {
+                invoke('respond_to_connection', { sourceId: sid, approved: false }).catch(() => {})
+                return null
+              }
+              return current
+            })
+          }, 60_000)
         }
       }
     )
@@ -465,6 +476,10 @@ function SettingsOverlay({ onClose }: { onClose: () => void }) {
   const [webUrl, setWebUrl] = useState('')
   const [startMinimized, setStartMinimized] = useState(false)
   const [launchOnStartup, setLaunchOnStartup] = useState(false)
+  const [turnUrl, setTurnUrl] = useState('')
+  const [turnUsername, setTurnUsername] = useState('')
+  const [turnCredential, setTurnCredential] = useState('')
+  const [showAdvanced, setShowAdvanced] = useState(false)
 
   useEffect(() => {
     Promise.all([
@@ -476,12 +491,15 @@ function SettingsOverlay({ onClose }: { onClose: () => void }) {
       setWebUrl((c.webUrl as string) ?? 'https://doomsdesk.hamidentifier.cloud')
       setStartMinimized(!!(c.startMinimized))
       setLaunchOnStartup(autostart)
+      setTurnUrl((c.turnUrl as string) ?? '')
+      setTurnUsername((c.turnUsername as string) ?? '')
+      setTurnCredential((c.turnCredential as string) ?? '')
     })
   }, [])
 
   async function save() {
     await Promise.all([
-      invoke('set_config', { partial: { serverUrl, webUrl, startMinimized } }),
+      invoke('set_config', { partial: { serverUrl, webUrl, startMinimized, turnUrl, turnUsername, turnCredential } }),
       invoke('set_launch_on_startup', { enabled: launchOnStartup }),
     ])
     onClose()
@@ -514,6 +532,44 @@ function SettingsOverlay({ onClose }: { onClose: () => void }) {
               className="w-full bg-bg border border-surface-border rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-brand"
             />
           </div>
+          {/* Advanced: custom TURN server */}
+          <button
+            type="button"
+            onClick={() => setShowAdvanced((v) => !v)}
+            className="text-xs text-slate-500 hover:text-slate-300 transition-colors text-left flex items-center gap-1"
+          >
+            <span className="text-slate-600">{showAdvanced ? '▾' : '▸'}</span>
+            Advanced (custom TURN server)
+          </button>
+          {showAdvanced && (
+            <div className="space-y-2 pl-3 border-l border-surface-border">
+              <div>
+                <label className="text-xs text-slate-500 mb-1 block">TURN Server URL <span className="text-slate-600">(leave blank to use built-in)</span></label>
+                <input
+                  value={turnUrl}
+                  onChange={(e) => setTurnUrl(e.target.value)}
+                  placeholder="turn:your-server.example.com:3478"
+                  className="w-full bg-bg border border-surface-border rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-brand font-mono text-xs"
+                />
+              </div>
+              <div className="flex gap-2">
+                <input
+                  value={turnUsername}
+                  onChange={(e) => setTurnUsername(e.target.value)}
+                  placeholder="Username"
+                  className="flex-1 bg-bg border border-surface-border rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-brand"
+                />
+                <input
+                  value={turnCredential}
+                  onChange={(e) => setTurnCredential(e.target.value)}
+                  placeholder="Credential"
+                  type="password"
+                  className="flex-1 bg-bg border border-surface-border rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-brand"
+                />
+              </div>
+            </div>
+          )}
+
           <label className="flex items-center gap-3 cursor-pointer">
             <div
               onClick={() => setStartMinimized((v) => !v)}

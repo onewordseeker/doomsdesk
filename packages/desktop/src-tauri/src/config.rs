@@ -13,6 +13,12 @@ pub struct Config {
     pub launch_on_startup: bool,
     pub server_url: String,
     pub web_url: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turn_url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turn_username: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turn_credential: Option<String>,
 }
 
 impl Default for Config {
@@ -25,6 +31,9 @@ impl Default for Config {
             launch_on_startup: false,
             server_url: "wss://doomsdesk.hamidentifier.cloud/signaling".into(),
             web_url: "https://doomsdesk.hamidentifier.cloud".into(),
+            turn_url: None,
+            turn_username: None,
+            turn_credential: None,
         }
     }
 }
