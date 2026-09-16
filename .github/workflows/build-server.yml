@@ -48,7 +48,7 @@ jobs:
         run: npm install
       - name: Type check
         working-directory: packages/web
-        run: npx tsc --noEmit
+        run: npm run typecheck
       - name: Build
         working-directory: packages/web
         run: npm run build
