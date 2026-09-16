@@ -23,6 +23,8 @@ import {
   WifiOff,
   Lock,
   Tv2,
+  ClipboardCopy,
+  ClipboardPaste,
 } from 'lucide-react';
 import clsx from 'clsx';
 
@@ -256,6 +258,15 @@ function ViewerInner() {
     if (dc.label === 'input') {
       inputDcRef.current = dc;
       dc.onopen = () => console.log('[DC:input] open');
+      dc.onmessage = (ev) => {
+        if (typeof ev.data !== 'string') return;
+        try {
+          const msg = JSON.parse(ev.data as string);
+          if (msg.type === 'agent_clipboard' && typeof msg.text === 'string') {
+            navigator.clipboard.writeText(msg.text).catch(() => {});
+          }
+        } catch { /* ignore */ }
+      };
     }
 
     if (dc.label === 'frames') {
@@ -522,12 +533,29 @@ function ViewerInner() {
 
   function onCanvasKeyDown(e: ReactKeyboardEvent<HTMLCanvasElement>) {
     e.preventDefault();
-    sendInput({ type: 'keydown', key: e.key, code: e.code });
+    // Ctrl+V or Cmd+V: push local clipboard to remote
+    if ((e.ctrlKey || e.metaKey) && e.key === 'v') {
+      navigator.clipboard.readText().then((text) => {
+        if (text) sendInput({ type: 'clipboard', text });
+      }).catch(() => {});
+      return;
+    }
+    sendInput({ type: 'keydown', key: e.key, code: e.code, ctrl: e.ctrlKey, alt: e.altKey, shift: e.shiftKey, meta: e.metaKey });
   }
 
   function onCanvasKeyUp(e: ReactKeyboardEvent<HTMLCanvasElement>) {
     e.preventDefault();
-    sendInput({ type: 'keyup', key: e.key, code: e.code });
+    sendInput({ type: 'keyup', key: e.key, code: e.code, ctrl: e.ctrlKey, alt: e.altKey, shift: e.shiftKey, meta: e.metaKey });
+  }
+
+  function pushClipboard() {
+    navigator.clipboard.readText().then((text) => {
+      if (text) sendInput({ type: 'clipboard', text });
+    }).catch(() => {});
+  }
+
+  function pullClipboard() {
+    sendInput({ type: 'request_clipboard' });
   }
 
   // ---------------------------------------------------------------------------
@@ -734,6 +762,20 @@ function ViewerInner() {
 
             {/* Right: controls */}
             <div className="flex items-center gap-1">
+              <button
+                onClick={pushClipboard}
+                title="Push local clipboard → remote (Ctrl+V)"
+                className="p-1.5 rounded-lg text-dark-muted hover:text-dark-text hover:bg-dark-border/40 transition-colors"
+              >
+                <ClipboardPaste size={14} />
+              </button>
+              <button
+                onClick={pullClipboard}
+                title="Pull remote clipboard → local"
+                className="p-1.5 rounded-lg text-dark-muted hover:text-dark-text hover:bg-dark-border/40 transition-colors"
+              >
+                <ClipboardCopy size={14} />
+              </button>
               <button
                 onClick={toggleFullscreen}
                 title={isFullscreen ? 'Exit fullscreen' : 'Fullscreen'}
