@@ -30,6 +30,7 @@ interface FileTransfer {
   direction: 'sending' | 'receiving'
   chunks: ArrayBuffer[]
   done: boolean
+  startedAt: number
 }
 
 const DEFAULT_TURN: RTCIceServer = {
@@ -356,11 +357,11 @@ export default function Session({ peerId, role, onEnd }: Props) {
         if (msg.type === 'file_start') {
           pendingTransfersRef.current.set(msg.id, {
             id: msg.id, name: msg.name, size: msg.size,
-            received: 0, direction: 'receiving', chunks: [], done: false,
+            received: 0, direction: 'receiving', chunks: [], done: false, startedAt: Date.now(),
           })
           setFileTransfers((prev) => [...prev, {
             id: msg.id, name: msg.name, size: msg.size,
-            received: 0, direction: 'receiving', chunks: [], done: false,
+            received: 0, direction: 'receiving', chunks: [], done: false, startedAt: Date.now(),
           }])
           setShowFiles(true)
           diag(`file receiving: ${msg.name} (${(msg.size / 1024).toFixed(0)} KB)`)
@@ -648,11 +649,11 @@ export default function Session({ peerId, role, onEnd }: Props) {
               if (msg.type === 'file_start') {
                 pendingTransfersRef.current.set(msg.id, {
                   id: msg.id, name: msg.name, size: msg.size,
-                  received: 0, direction: 'receiving', chunks: [], done: false,
+                  received: 0, direction: 'receiving', chunks: [], done: false, startedAt: Date.now(),
                 })
                 setFileTransfers((prev) => [...prev, {
                   id: msg.id, name: msg.name, size: msg.size,
-                  received: 0, direction: 'receiving', chunks: [], done: false,
+                  received: 0, direction: 'receiving', chunks: [], done: false, startedAt: Date.now(),
                 }])
                 setShowFiles(true)
               } else if (msg.type === 'file_end') {
@@ -728,7 +729,7 @@ export default function Session({ peerId, role, onEnd }: Props) {
     const size = file.size
 
     diag(`sending file: ${name} (${(size / 1024).toFixed(0)} KB)`)
-    setFileTransfers((prev) => [...prev, { id, name, size, received: 0, direction: 'sending', chunks: [], done: false }])
+    setFileTransfers((prev) => [...prev, { id, name, size, received: 0, direction: 'sending', chunks: [], done: false, startedAt: Date.now() }])
     setShowFiles(true)
 
     dc.send(JSON.stringify({ type: 'file_start', id, name, size }))
@@ -994,6 +995,14 @@ export default function Session({ peerId, role, onEnd }: Props) {
             <span className="text-xs text-slate-600 font-mono shrink-0" data-tauri-drag-region>{formatDuration(sessionDuration)}</span>
           </div>
           <div className="flex items-center gap-2 shrink-0">
+            {/* Send file */}
+            <button
+              onClick={pickAndSendFile}
+              className="p-1.5 rounded-lg transition-colors text-slate-400 hover:text-white hover:bg-surface"
+              title="Send file to controller"
+            >
+              <Upload size={13} />
+            </button>
             {/* Chat toggle with unread badge */}
             <div className="relative">
               <button
@@ -1407,22 +1416,36 @@ export default function Session({ peerId, role, onEnd }: Props) {
             </button>
           </div>
           <div className="p-2 space-y-2 max-h-48 overflow-y-auto">
-            {fileTransfers.map((ft) => (
-              <div key={ft.id} className="text-xs">
-                <div className="flex justify-between text-slate-400 mb-0.5">
-                  <span className="truncate max-w-[160px]">{ft.name}</span>
-                  <span className="text-slate-500 ml-2">
-                    {ft.done ? '✓' : `${Math.round((ft.received / ft.size) * 100)}%`}
-                  </span>
+            {fileTransfers.map((ft) => {
+              const pct = Math.min(100, (ft.received / ft.size) * 100)
+              const elapsedSec = (Date.now() - ft.startedAt) / 1000
+              const kbps = elapsedSec > 0 ? (ft.received / 1024 / elapsedSec) : 0
+              const speedStr = kbps > 1024
+                ? `${(kbps / 1024).toFixed(1)} MB/s`
+                : `${Math.round(kbps)} KB/s`
+              const sizeStr = ft.size > 1024 * 1024
+                ? `${(ft.size / 1024 / 1024).toFixed(1)} MB`
+                : `${Math.round(ft.size / 1024)} KB`
+              return (
+                <div key={ft.id} className="text-xs">
+                  <div className="flex justify-between text-slate-400 mb-0.5">
+                    <span className="truncate max-w-[150px]" title={ft.name}>{ft.name}</span>
+                    <span className="text-slate-500 ml-2 shrink-0">
+                      {ft.done ? `✓ ${sizeStr}` : `${Math.round(pct)}%`}
+                    </span>
+                  </div>
+                  {!ft.done && (
+                    <div className="text-slate-600 text-[10px] mb-0.5">{sizeStr} · {speedStr}</div>
+                  )}
+                  <div className="w-full bg-surface rounded-full h-1">
+                    <div
+                      className={`h-1 rounded-full transition-all ${ft.done ? 'bg-emerald-500' : 'bg-brand'}`}
+                      style={{ width: `${pct}%` }}
+                    />
+                  </div>
                 </div>
-                <div className="w-full bg-surface rounded-full h-1">
-                  <div
-                    className={`h-1 rounded-full transition-all ${ft.done ? 'bg-emerald-500' : 'bg-brand'}`}
-                    style={{ width: `${Math.min(100, (ft.received / ft.size) * 100)}%` }}
-                  />
-                </div>
-              </div>
-            ))}
+              )
+            })}
           </div>
         </div>
       )}
