@@ -20,52 +20,73 @@ export default function RemoteDisplay({ framesChannel, dataChannel, remoteScreen
 
   useEffect(() => { dcRef.current = dataChannel }, [dataChannel])
 
-  // Decode and render incoming JPEG frames from the data channel
+  // Decode and render incoming H.264 Annex B frames via WebCodecs VideoDecoder
   useEffect(() => {
     const canvas = canvasRef.current
     if (!canvas || !framesChannel) return
     const ctx = canvas.getContext('2d', { alpha: false })
     if (!ctx) return
 
-    let latestBitmap: ImageBitmap | null = null
-    let rafId = 0
-    let lastFrameAt = 0 // 0 = no frame received yet
+    let lastFrameAt = 0
     let hasReceivedFrame = false
-    let decodeGen = 0 // incremented per message; stale decodes discard their bitmap
 
-    const rafPaint = () => {
-      if (latestBitmap) {
-        if (canvas.width !== latestBitmap.width || canvas.height !== latestBitmap.height) {
-          canvas.width = latestBitmap.width
-          canvas.height = latestBitmap.height
+    // Resize canvas to match decoded frame on first frame / resolution change
+    const decoder = new VideoDecoder({
+      output: (frame) => {
+        if (canvas.width !== frame.displayWidth || canvas.height !== frame.displayHeight) {
+          canvas.width  = frame.displayWidth
+          canvas.height = frame.displayHeight
         }
-        ctx.drawImage(latestBitmap, 0, 0)
-        latestBitmap.close()
-        latestBitmap = null
-      }
-      rafId = requestAnimationFrame(rafPaint)
-    }
-    rafId = requestAnimationFrame(rafPaint)
+        ctx.drawImage(frame, 0, 0)
+        frame.close()
+      },
+      error: (err) => {
+        console.warn('[VideoDecoder] error — resetting:', err)
+        try {
+          decoder.reset()
+          decoder.configure({ codec: 'avc1.640028', optimizeForLatency: true })
+        } catch {}
+      },
+    })
 
-    const onMessage = async (e: MessageEvent) => {
-      if (typeof e.data !== 'string') return
+    try {
+      decoder.configure({ codec: 'avc1.640028', optimizeForLatency: true })
+    } catch (err) {
+      console.error('[VideoDecoder] configure failed:', err)
+      return
+    }
+
+    framesChannel.binaryType = 'arraybuffer'
+
+    const onMessage = (e: MessageEvent) => {
+      if (!(e.data instanceof ArrayBuffer)) return
       hasReceivedFrame = true
       lastFrameAt = performance.now()
       setHasFrames(true)
       setFrozen(false)
-      const myGen = ++decodeGen
-      try {
-        // Decode base64 JPEG string → Blob → ImageBitmap (off main thread)
-        const binaryStr = atob(e.data)
-        const bytes = new Uint8Array(binaryStr.length)
-        for (let i = 0; i < binaryStr.length; i++) bytes[i] = binaryStr.charCodeAt(i)
-        const blob = new Blob([bytes], { type: 'image/jpeg' })
-        const bitmap = await createImageBitmap(blob)
-        // Discard if a newer frame already decoded — prevents stale bitmap pileup
-        if (myGen !== decodeGen) { bitmap.close(); return }
-        latestBitmap?.close()
-        latestBitmap = bitmap
-      } catch {}
+
+      const data = new Uint8Array(e.data)
+
+      // Scan Annex B start codes to detect NAL type — key if SPS(7)/PPS(8)/IDR(5) present
+      let isKey = false
+      for (let i = 0; i < data.length - 5; i++) {
+        if (data[i] === 0 && data[i+1] === 0 && data[i+2] === 0 && data[i+3] === 1) {
+          const nalType = data[i + 4] & 0x1f
+          if (nalType === 5 || nalType === 7 || nalType === 8) { isKey = true; break }
+        }
+      }
+
+      if (decoder.state !== 'closed') {
+        try {
+          decoder.decode(new EncodedVideoChunk({
+            type: isKey ? 'key' : 'delta',
+            timestamp: Math.round(performance.now() * 1000), // μs
+            data: e.data,
+          }))
+        } catch (err) {
+          console.warn('[VideoDecoder] decode error:', err)
+        }
+      }
     }
 
     framesChannel.addEventListener('message', onMessage)
@@ -73,7 +94,7 @@ export default function RemoteDisplay({ framesChannel, dataChannel, remoteScreen
     // Stall watchdog: if frames stop arriving for 8s, show overlay and request capture restart
     const stallId = setInterval(() => {
       if (!hasReceivedFrame) return
-      if (performance.now() - lastFrameAt > 8000) {
+      if (performance.now() - lastFrameAt > 5000) {
         setFrozen(true)
         lastFrameAt = performance.now()
         const dc = dcRef.current
@@ -82,10 +103,9 @@ export default function RemoteDisplay({ framesChannel, dataChannel, remoteScreen
     }, 2000)
 
     return () => {
-      cancelAnimationFrame(rafId)
       clearInterval(stallId)
       framesChannel.removeEventListener('message', onMessage)
-      latestBitmap?.close()
+      try { decoder.close() } catch {}
     }
   }, [framesChannel])
 

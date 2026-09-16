@@ -148,10 +148,10 @@ export default function Session({ peerId, role, onEnd }: Props) {
 
     const agentCleanups: Array<() => void> = []
 
-    // Quality + capture state — declared early so all handlers can reference them
+    // Adaptive bitrate state — declared early so all handlers can reference them
     let framesSent = 0
     let framesSkipped = 0
-    let currentQuality = 60
+    let currentBps = 4_000_000   // start at 4 Mbps
     let stableWindows = 0
     let consecutiveErrors = 0
     let captureRestarting = false
@@ -159,12 +159,12 @@ export default function Session({ peerId, role, onEnd }: Props) {
     function doRestartCapture(reason: string) {
       if (captureRestarting) return
       captureRestarting = true
-      diag(`${reason} — resetting quality, restarting capture`)
-      currentQuality = 60
+      diag(`${reason} — resetting bitrate, restarting capture`)
+      currentBps = 4_000_000
       consecutiveErrors = 0
-      invoke('set_capture_quality', { quality: 60 }).catch(() => {})
+      invoke('set_capture_bitrate', { bps: 4_000_000 }).catch(() => {})
       invoke('stop_native_capture').catch(() => {})
-      // 500ms lets Windows display settle after a resolution change before we try to capture
+      // 500ms lets Windows display settle after a resolution change
       setTimeout(() => {
         invoke('start_native_capture').catch(() => {})
         captureRestarting = false
@@ -200,26 +200,28 @@ export default function Session({ peerId, role, onEnd }: Props) {
     setRemoteScreenSize({ width: window.screen.width, height: window.screen.height })
     origScreenRef.current = { width: window.screen.width, height: window.screen.height }
 
-    // Auto-quality: adapt JPEG quality based on send/skip/error ratio every 3s
-    const qualityInterval = setInterval(() => {
+    // Adaptive bitrate: adjust H.264 bitrate based on DC back-pressure every 3s
+    const bitrateInterval = setInterval(() => {
       const total = framesSent + framesSkipped
       if (total === 0) return
       const skipRate = framesSkipped / total
-      diag(`sent=${framesSent} skip=${framesSkipped} skip%=${Math.round(skipRate * 100)} q=${currentQuality}`)
-      if (skipRate > 0 && currentQuality > 40) {
-        // Drop faster on high skip rates
-        const drop = skipRate > 0.8 ? 25 : skipRate > 0.5 ? 15 : 10
-        currentQuality = Math.max(40, currentQuality - drop)
-        invoke('set_capture_quality', { quality: currentQuality }).catch(() => {})
+      const mbps = (currentBps / 1_000_000).toFixed(1)
+      diag(`sent=${framesSent} skip=${framesSkipped} skip%=${Math.round(skipRate * 100)} bps=${mbps}M`)
+
+      if (skipRate > 0.05) {
+        // Network can't keep up — reduce bitrate (faster drop on high skip rates)
+        const factor = skipRate > 0.5 ? 0.5 : skipRate > 0.2 ? 0.7 : 0.85
+        currentBps = Math.max(800_000, Math.round(currentBps * factor))
+        invoke('set_capture_bitrate', { bps: currentBps }).catch(() => {})
         stableWindows = 0
-        diag(`quality ↓ ${currentQuality}`)
+        diag(`bitrate ↓ ${(currentBps / 1_000_000).toFixed(1)} Mbps`)
       } else if (skipRate === 0) {
         stableWindows++
-        if (stableWindows >= 2 && currentQuality < 85) {
-          currentQuality = Math.min(85, currentQuality + 5)
-          invoke('set_capture_quality', { quality: currentQuality }).catch(() => {})
+        if (stableWindows >= 3 && currentBps < 6_000_000) {
+          currentBps = Math.min(6_000_000, Math.round(currentBps * 1.15))
+          invoke('set_capture_bitrate', { bps: currentBps }).catch(() => {})
           stableWindows = 0
-          diag(`quality ↑ ${currentQuality}`)
+          diag(`bitrate ↑ ${(currentBps / 1_000_000).toFixed(1)} Mbps`)
         }
       } else {
         stableWindows = 0
@@ -227,15 +229,18 @@ export default function Session({ peerId, role, onEnd }: Props) {
       framesSent = 0
       framesSkipped = 0
     }, 3000)
-    agentCleanups.push(() => clearInterval(qualityInterval))
+    agentCleanups.push(() => clearInterval(bitrateInterval))
 
-    // Forward Rust JPEG frames as raw base64 strings — zero decode cost on agent side
+    // Rust emits H.264 Annex B as base64; decode to binary and forward over DC
     const frameUnsub = await listen<string>('screen-frame', (e) => {
-      consecutiveErrors = 0 // successful frame resets the error streak
+      consecutiveErrors = 0
       if (framesDc.readyState !== 'open') return
-      if (framesDc.bufferedAmount > 524288) { framesSkipped++; return }
+      if (framesDc.bufferedAmount > 262144) { framesSkipped++; return }  // 256 KB back-pressure
       try {
-        framesDc.send(e.payload)
+        const bin = atob(e.payload)
+        const buf = new Uint8Array(bin.length)
+        for (let i = 0; i < bin.length; i++) buf[i] = bin.charCodeAt(i)
+        framesDc.send(buf.buffer)
         framesSent++
       } catch { framesSkipped++ }
     })
@@ -285,6 +290,7 @@ export default function Session({ peerId, role, onEnd }: Props) {
       diag(`DC received: ${dc.label}`)
 
       if (dc.label === 'frames') {
+        dc.binaryType = 'arraybuffer'
         setFramesChannel(dc)
         dc.onopen = () => diag('frames DC open')
         dc.onclose = () => diag('frames DC closed')

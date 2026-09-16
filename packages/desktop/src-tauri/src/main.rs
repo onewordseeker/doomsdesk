@@ -2,6 +2,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod config;
+mod encode;
 mod input;
 mod signaling;
 
@@ -10,7 +11,7 @@ use input::InputWorker;
 use serde_json::Value;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
-use std::sync::atomic::{AtomicU64, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, AtomicU8, Ordering};
 use tauri::{
     menu::{Menu, MenuItem},
     tray::{MouseButton, TrayIconBuilder, TrayIconEvent},
@@ -28,6 +29,7 @@ struct AppState {
     permanent_password: Mutex<String>,
     capture_generation: Arc<AtomicU64>,
     capture_quality: Arc<AtomicU8>,
+    capture_bitrate: Arc<AtomicU32>,
 }
 
 // ── Commands ──────────────────────────────────────────────────────────────────
@@ -181,50 +183,89 @@ fn forward_agent_log(app: AppHandle, msg: String) {
 async fn start_native_capture(app: AppHandle, state: State<'_, AppState>) -> Result<(), String> {
     use screenshots::Screen;
     use screenshots::image::{DynamicImage, imageops::FilterType};
-    use screenshots::image::codecs::jpeg::JpegEncoder;
     use base64::Engine;
 
-    let quality_ref = state.capture_quality.clone();
-    let gen_ref = state.capture_generation.clone();
+    let gen_ref     = state.capture_generation.clone();
+    let bitrate_ref = state.capture_bitrate.clone();
 
-    // Increment generation — any loop still running with the old gen will see
-    // the mismatch on its next iteration and exit cleanly, preventing double-loops.
+    // Increment generation — any running loop with the old gen exits on next iteration.
     let my_gen = gen_ref.fetch_add(1, Ordering::SeqCst) + 1;
 
     tauri::async_runtime::spawn_blocking(move || {
+        let mut encoder: Option<encode::H264Encoder> = None;
+        let mut pts_ms: u64 = 0;
+        let mut last_frame_hash: u64 = 0;
+        let mut last_send_ms: u64 = 0;       // timestamp of last emitted frame
+        let mut last_bitrate: u32 = 0;
+        const FRAME_MS: u64 = 33;            // ~30 fps target
+        const IDLE_FORCE_MS: u64 = 2_000;   // keepalive: force send every 2s even if static
+
         loop {
-            if gen_ref.load(Ordering::SeqCst) != my_gen {
-                break;
-            }
+            if gen_ref.load(Ordering::SeqCst) != my_gen { break; }
+
+            let frame_start = std::time::Instant::now();
 
             let ok = (|| -> Option<()> {
                 let screens = Screen::all().ok()?;
                 let screen = screens.first()?;
-                let captured = screen.capture().ok()?; // RgbaImage
+                let captured = screen.capture().ok()?;
 
                 let w = captured.width();
                 let h = captured.height();
-
                 let dyn_img = DynamicImage::ImageRgba8(captured);
 
-                // Cap at 1920px wide — keeps full HD while limiting bandwidth
-                let dyn_img = if w > 1920 {
-                    dyn_img.resize(
-                        1920,
-                        (h as f64 * 1920.0 / w as f64) as u32,
-                        FilterType::Triangle,
-                    )
+                // Cap at 1920 px wide
+                let (dyn_img, eff_w, eff_h) = if w > 1920 {
+                    let eff_h = (h as f64 * 1920.0 / w as f64) as u32;
+                    let img = dyn_img.resize(1920, eff_h, FilterType::Triangle);
+                    let (iw, ih) = (img.width(), img.height());
+                    (img, iw, ih)
                 } else {
-                    dyn_img
+                    (dyn_img, w, h)
                 };
 
-                let rgb = dyn_img.to_rgb8();
-                let quality = quality_ref.load(Ordering::Relaxed);
-                let mut jpeg_buf = Vec::new();
-                let mut enc = JpegEncoder::new_with_quality(&mut jpeg_buf, quality);
-                enc.encode_image(&rgb).ok()?;
+                // (Re)create encoder on dimension change
+                if encoder.as_ref().map(|e| e.dimensions()) != Some((eff_w, eff_h)) {
+                    encoder = encode::H264Encoder::new(eff_w, eff_h);
+                    pts_ms = 0;
+                    last_frame_hash = 0;
+                    last_send_ms = 0;
+                }
+                let enc = encoder.as_mut()?;
 
-                let b64 = base64::engine::general_purpose::STANDARD.encode(&jpeg_buf);
+                // Live bitrate adaptation — VT accepts property updates without session restart
+                let wanted_bps = bitrate_ref.load(Ordering::Relaxed);
+                if wanted_bps != last_bitrate && wanted_bps > 0 {
+                    enc.set_bitrate(wanted_bps);
+                    last_bitrate = wanted_bps;
+                }
+
+                let rgba = dyn_img.into_rgba8().into_raw();
+
+                // Cheap perceptual hash — sample every 512th byte (128 pixels), XOR into u64
+                let hash: u64 = rgba
+                    .chunks_exact(512)
+                    .enumerate()
+                    .fold(0u64, |acc, (i, chunk)| {
+                        acc ^ ((chunk[0] as u64)
+                            .wrapping_mul(6364136223846793005)
+                            .wrapping_add(i as u64))
+                    });
+
+                let idle_too_long = pts_ms.saturating_sub(last_send_ms) >= IDLE_FORCE_MS;
+                let content_changed = hash != last_frame_hash;
+
+                if !content_changed && !idle_too_long {
+                    // Screen is static and keepalive not due — skip encode
+                    return Some(());
+                }
+
+                last_frame_hash = hash;
+
+                let frame = enc.encode(&rgba, pts_ms)?;
+                last_send_ms = pts_ms;
+
+                let b64 = base64::engine::general_purpose::STANDARD.encode(&frame.data);
                 let _ = app.emit("screen-frame", b64);
                 Some(())
             })();
@@ -233,7 +274,13 @@ async fn start_native_capture(app: AppHandle, state: State<'_, AppState>) -> Res
                 let _ = app.emit("screen-frame-error", "capture_failed");
             }
 
-            std::thread::sleep(std::time::Duration::from_millis(33)); // ~30 fps
+            pts_ms = pts_ms.wrapping_add(FRAME_MS);
+
+            let elapsed = frame_start.elapsed();
+            let budget = std::time::Duration::from_millis(FRAME_MS);
+            if elapsed < budget {
+                std::thread::sleep(budget - elapsed);
+            }
         }
     });
 
@@ -249,6 +296,12 @@ fn stop_native_capture(state: State<'_, AppState>) {
 fn set_capture_quality(state: State<'_, AppState>, quality: u8) {
     let clamped = quality.clamp(20, 95);
     state.capture_quality.store(clamped, Ordering::Relaxed);
+}
+
+#[tauri::command]
+fn set_capture_bitrate(state: State<'_, AppState>, bps: u32) {
+    let clamped = bps.clamp(500_000, 8_000_000);
+    state.capture_bitrate.store(clamped, Ordering::Relaxed);
 }
 
 // ── Main ──────────────────────────────────────────────────────────────────────
@@ -287,6 +340,7 @@ fn main() {
                 permanent_password: Mutex::new(perm_pw.clone()),
                 capture_generation: Arc::new(AtomicU64::new(0)),
                 capture_quality: Arc::new(AtomicU8::new(60)),
+                capture_bitrate: Arc::new(AtomicU32::new(0)),
             });
 
             // Start signaling loop
@@ -331,6 +385,7 @@ fn main() {
             start_native_capture,
             stop_native_capture,
             set_capture_quality,
+            set_capture_bitrate,
         ])
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
