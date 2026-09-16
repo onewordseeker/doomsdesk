@@ -543,12 +543,29 @@ mod platform {
                     let w = ev["width"].as_u64().unwrap_or(0);
                     let h = ev["height"].as_u64().unwrap_or(0);
                     if w > 0 && h > 0 {
+                        // Correct DEVMODE-based approach: EnumDisplaySettings reads current
+                        // settings, we patch width/height, ChangeDisplaySettings applies it.
                         let script = format!(
-                            "$dm=New-Object System.Object;\
-                            Add-Type -MemberDefinition '[DllImport(\"user32.dll\")]public static extern int ChangeDisplaySettings(ref object dm,int f);' -Name U -Namespace W;\
-                            $dm|Add-Member dmPelsWidth {};\
-                            $dm|Add-Member dmPelsHeight {};\
-                            [W.U]::ChangeDisplaySettings([ref]$dm,0)", w, h
+                            "Add-Type -TypeDefinition \
+'using System;using System.Runtime.InteropServices;\
+[StructLayout(LayoutKind.Sequential,CharSet=CharSet.Ansi)]\
+public struct DM{{\
+[MarshalAs(UnmanagedType.ByValTStr,SizeConst=32)]public string n;\
+public short sv,dv,sz,dx;public uint fl;public int px,py;\
+public uint ro,fo;public short co,du,yr,tt,cl;\
+[MarshalAs(UnmanagedType.ByValTStr,SizeConst=32)]public string fn;\
+public short lp;public uint bp,pw,ph,df,freq;}}\
+public class WD{{\
+[DllImport(\"user32\")]public static extern bool EDS(string d,int n,ref DM m);\
+[DllImport(\"user32\")]public static extern int CDS(ref DM m,int f);\
+}}' -Language CSharp;\
+$dm=New-Object DM;\
+$dm.sz=[System.Runtime.InteropServices.Marshal]::SizeOf($dm);\
+[WD]::EDS($null,-1,[ref]$dm);\
+$dm.pw={};$dm.ph={};\
+$dm.fl=0x00180000;\
+[WD]::CDS([ref]$dm,0)",
+                            w, h
                         );
                         let _ = std::process::Command::new("powershell")
                             .args(["-NoProfile", "-NonInteractive", "-Command", &script])
