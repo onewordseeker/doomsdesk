@@ -1,5 +1,6 @@
 import { Router, Request, Response } from 'express';
 import { v4 as uuidv4 } from 'uuid';
+import crypto from 'crypto';
 import {
   createUser,
   getUserByEmail,
@@ -18,6 +19,19 @@ import {
   upsertUserSettings,
   updateUserName,
   updateUserPassword,
+  createAuditLog,
+  getAuditLogs,
+  createTeam,
+  getTeamById,
+  getTeamsByUserId,
+  addTeamMember,
+  removeTeamMember,
+  updateMemberRole,
+  getTeamMembers,
+  getMemberRole,
+  updateTeamName,
+  deleteTeam,
+  canManageTeam,
 } from './db.js';
 import {
   hashPassword,
@@ -27,6 +41,7 @@ import {
   toPublicUser,
   type AuthRequest,
 } from './auth.js';
+import { loginLimiter } from './ratelimit.js';
 import type { SignalingServer } from './signaling.js';
 
 // ---------------------------------------------------------------------------
@@ -124,6 +139,20 @@ export function createApiRouter(signaling: SignalingServer): Router {
 
   /** POST /api/auth/login */
   router.post('/auth/login', async (req: Request, res: Response) => {
+    const ip =
+      (req.headers['x-forwarded-for'] as string | undefined)?.split(',')[0]?.trim() ??
+      req.socket.remoteAddress ??
+      'unknown';
+
+    // 10 login attempts per hour per IP
+    if (!loginLimiter.check(`login:${ip}`, 10, 60 * 60 * 1000)) {
+      const retryMs = loginLimiter.retryAfterMs(`login:${ip}`);
+      res.status(429).json({
+        error: `Too many login attempts. Retry in ${Math.ceil(retryMs / 1000)}s.`,
+      });
+      return;
+    }
+
     const { email, password } = req.body as { email?: string; password?: string };
 
     if (!email || !password) {
@@ -133,17 +162,20 @@ export function createApiRouter(signaling: SignalingServer): Router {
 
     const user = getUserByEmail(email.toLowerCase());
     if (!user) {
+      createAuditLog(null, null, 'auth_failed', 'login', `email=${email}`, ip);
       res.status(401).json({ error: 'Invalid credentials' });
       return;
     }
 
     const ok = await verifyPassword(password, user.password_hash);
     if (!ok) {
+      createAuditLog(user.id, null, 'auth_failed', 'login', 'bad password', ip);
       res.status(401).json({ error: 'Invalid credentials' });
       return;
     }
 
     const token = signToken(user);
+    createAuditLog(user.id, null, 'login', 'auth', undefined, ip);
     res.json({ token, user: toPublicUser(user) });
   });
 
@@ -465,6 +497,401 @@ export function createApiRouter(signaling: SignalingServer): Router {
     res.json({ settings: formatSettings(updated) });
   });
 
+  // =========================================================================
+  // Audit logs
+  // =========================================================================
+
+  /** GET /api/audit?page=1&limit=20 */
+  router.get('/audit', requireAuth, (req: AuthRequest, res: Response) => {
+    const page  = Math.max(1, parseInt((req.query.page  as string) ?? '1',  10) || 1);
+    const limit = Math.min(100, Math.max(1, parseInt((req.query.limit as string) ?? '20', 10) || 20));
+
+    const { logs, total } = getAuditLogs(req.userId!, page, limit);
+
+    res.json({
+      logs: logs.map((l) => ({
+        id: l.id,
+        userId: l.user_id,
+        deviceId: l.device_id,
+        action: l.action,
+        resource: l.resource,
+        detail: l.detail,
+        ip: l.ip,
+        createdAt: l.created_at,
+      })),
+      pagination: {
+        page,
+        limit,
+        total,
+        pages: Math.ceil(total / limit),
+      },
+    });
+  });
+
+  // =========================================================================
+  // Teams
+  // =========================================================================
+
+  /** POST /api/teams */
+  router.post('/teams', requireAuth, (req: AuthRequest, res: Response) => {
+    const { name } = req.body as { name?: string };
+    if (!name || !name.trim()) {
+      res.status(400).json({ error: 'name is required' });
+      return;
+    }
+
+    const team = createTeam(uuidv4(), name.trim(), req.userId!);
+    res.status(201).json({ team: formatTeam(team) });
+  });
+
+  /** GET /api/teams */
+  router.get('/teams', requireAuth, (req: AuthRequest, res: Response) => {
+    const teams = getTeamsByUserId(req.userId!);
+    res.json({ teams: teams.map(formatTeam) });
+  });
+
+  /** GET /api/teams/:id */
+  router.get('/teams/:id', requireAuth, (req: AuthRequest, res: Response) => {
+    const team = getTeamById(req.params.id);
+    if (!team) {
+      res.status(404).json({ error: 'Team not found' });
+      return;
+    }
+
+    const role = getMemberRole(team.id, req.userId!);
+    if (!role) {
+      res.status(403).json({ error: 'Forbidden' });
+      return;
+    }
+
+    res.json({ team: formatTeam(team) });
+  });
+
+  /** PUT /api/teams/:id */
+  router.put('/teams/:id', requireAuth, (req: AuthRequest, res: Response) => {
+    const team = getTeamById(req.params.id);
+    if (!team) {
+      res.status(404).json({ error: 'Team not found' });
+      return;
+    }
+
+    const role = getMemberRole(team.id, req.userId!);
+    if (!role || !canManageTeam(role)) {
+      res.status(403).json({ error: 'Forbidden: owner or admin required' });
+      return;
+    }
+
+    const { name } = req.body as { name?: string };
+    if (!name || !name.trim()) {
+      res.status(400).json({ error: 'name is required' });
+      return;
+    }
+
+    const updated = updateTeamName(team.id, name.trim());
+    if (!updated) {
+      res.status(500).json({ error: 'Update failed' });
+      return;
+    }
+
+    res.json({ team: formatTeam(updated) });
+  });
+
+  /** DELETE /api/teams/:id */
+  router.delete('/teams/:id', requireAuth, (req: AuthRequest, res: Response) => {
+    const team = getTeamById(req.params.id);
+    if (!team) {
+      res.status(404).json({ error: 'Team not found' });
+      return;
+    }
+
+    if (team.owner_id !== req.userId) {
+      res.status(403).json({ error: 'Forbidden: owner only' });
+      return;
+    }
+
+    deleteTeam(team.id);
+    res.status(204).send();
+  });
+
+  /** GET /api/teams/:id/members */
+  router.get('/teams/:id/members', requireAuth, (req: AuthRequest, res: Response) => {
+    const team = getTeamById(req.params.id);
+    if (!team) {
+      res.status(404).json({ error: 'Team not found' });
+      return;
+    }
+
+    const role = getMemberRole(team.id, req.userId!);
+    if (!role) {
+      res.status(403).json({ error: 'Forbidden' });
+      return;
+    }
+
+    const members = getTeamMembers(team.id);
+    res.json({
+      members: members.map((m) => ({
+        userId: m.user_id,
+        email: m.email,
+        name: m.name,
+        role: m.role,
+        invitedAt: m.invited_at,
+      })),
+    });
+  });
+
+  /** POST /api/teams/:id/members — invite by email */
+  router.post('/teams/:id/members', requireAuth, (req: AuthRequest, res: Response) => {
+    const team = getTeamById(req.params.id);
+    if (!team) {
+      res.status(404).json({ error: 'Team not found' });
+      return;
+    }
+
+    const actorRole = getMemberRole(team.id, req.userId!);
+    if (!actorRole || !canManageTeam(actorRole)) {
+      res.status(403).json({ error: 'Forbidden: owner or admin required' });
+      return;
+    }
+
+    const { email, role = 'member' } = req.body as { email?: string; role?: string };
+    if (!email) {
+      res.status(400).json({ error: 'email is required' });
+      return;
+    }
+
+    const validRoles = ['admin', 'member', 'viewer'];
+    if (!validRoles.includes(role)) {
+      res.status(400).json({ error: `role must be one of: ${validRoles.join(', ')}` });
+      return;
+    }
+
+    const invitee = getUserByEmail(email.toLowerCase());
+    if (!invitee) {
+      res.status(404).json({ error: 'No user found with that email address' });
+      return;
+    }
+
+    // Prevent downgrading the owner via this endpoint
+    const existingRole = getMemberRole(team.id, invitee.id);
+    if (existingRole === 'owner') {
+      res.status(400).json({ error: 'Cannot change the owner role' });
+      return;
+    }
+
+    addTeamMember(team.id, invitee.id, role);
+    res.status(201).json({
+      member: {
+        userId: invitee.id,
+        email: invitee.email,
+        name: invitee.name,
+        role,
+      },
+    });
+  });
+
+  /** PUT /api/teams/:id/members/:userId */
+  router.put('/teams/:id/members/:userId', requireAuth, (req: AuthRequest, res: Response) => {
+    const team = getTeamById(req.params.id);
+    if (!team) {
+      res.status(404).json({ error: 'Team not found' });
+      return;
+    }
+
+    const actorRole = getMemberRole(team.id, req.userId!);
+    if (!actorRole || !canManageTeam(actorRole)) {
+      res.status(403).json({ error: 'Forbidden: owner or admin required' });
+      return;
+    }
+
+    const { role } = req.body as { role?: string };
+    const validRoles = ['admin', 'member', 'viewer'];
+    if (!role || !validRoles.includes(role)) {
+      res.status(400).json({ error: `role must be one of: ${validRoles.join(', ')}` });
+      return;
+    }
+
+    const targetRole = getMemberRole(team.id, req.params.userId);
+    if (!targetRole) {
+      res.status(404).json({ error: 'Member not found' });
+      return;
+    }
+
+    if (targetRole === 'owner') {
+      res.status(400).json({ error: 'Cannot change the owner role' });
+      return;
+    }
+
+    updateMemberRole(team.id, req.params.userId, role);
+    res.json({ userId: req.params.userId, role });
+  });
+
+  /** DELETE /api/teams/:id/members/:userId */
+  router.delete('/teams/:id/members/:userId', requireAuth, (req: AuthRequest, res: Response) => {
+    const team = getTeamById(req.params.id);
+    if (!team) {
+      res.status(404).json({ error: 'Team not found' });
+      return;
+    }
+
+    const actorRole = getMemberRole(team.id, req.userId!);
+    if (!actorRole || !canManageTeam(actorRole)) {
+      // Allow self-removal
+      if (req.params.userId !== req.userId) {
+        res.status(403).json({ error: 'Forbidden: owner or admin required' });
+        return;
+      }
+    }
+
+    const targetRole = getMemberRole(team.id, req.params.userId);
+    if (!targetRole) {
+      res.status(404).json({ error: 'Member not found' });
+      return;
+    }
+
+    if (targetRole === 'owner') {
+      res.status(400).json({ error: 'Cannot remove the team owner' });
+      return;
+    }
+
+    removeTeamMember(team.id, req.params.userId);
+    res.status(204).send();
+  });
+
+  // =========================================================================
+  // Billing — Stripe integration
+  // =========================================================================
+
+  /**
+   * POST /api/billing/checkout
+   *
+   * Creates a Stripe Checkout Session and returns the session URL.
+   * The client redirects the user to that URL to complete payment.
+   *
+   * TODO: Replace the stub body with the real Stripe SDK call once
+   *       `stripe` npm package is added (pin to ^14.x).
+   *
+   *   const stripe = new Stripe(process.env.STRIPE_SECRET_KEY!, { apiVersion: '2024-04-10' });
+   *   const session = await stripe.checkout.sessions.create({
+   *     mode: 'subscription',
+   *     customer_email: user.email,
+   *     line_items: [{ price: priceId, quantity: 1 }],
+   *     success_url: `${process.env.APP_URL}/billing?success=1`,
+   *     cancel_url:  `${process.env.APP_URL}/billing?cancelled=1`,
+   *     metadata: { userId: user.id },
+   *   });
+   *   res.json({ url: session.url });
+   */
+  router.post('/billing/checkout', requireAuth, (req: AuthRequest, res: Response) => {
+    const { priceId } = req.body as { priceId?: string };
+    if (!priceId) {
+      res.status(400).json({ error: 'priceId is required' });
+      return;
+    }
+
+    const user = getUserById(req.userId!);
+    if (!user) {
+      res.status(404).json({ error: 'User not found' });
+      return;
+    }
+
+    // TODO: Integrate with Stripe Checkout (see JSDoc above)
+    res.status(501).json({
+      error: 'Stripe integration pending — set STRIPE_SECRET_KEY and install the stripe package',
+    });
+  });
+
+  /**
+   * POST /api/billing/portal
+   *
+   * Returns a Stripe Customer Portal URL so the user can manage their
+   * subscription, update payment methods, or cancel.
+   *
+   * TODO: Replace the stub body once Stripe SDK is available:
+   *
+   *   const stripe = new Stripe(process.env.STRIPE_SECRET_KEY!, { apiVersion: '2024-04-10' });
+   *   const session = await stripe.billingPortal.sessions.create({
+   *     customer: user.stripe_customer_id,   // stored on the users table
+   *     return_url: `${process.env.APP_URL}/billing`,
+   *   });
+   *   res.json({ url: session.url });
+   */
+  router.post('/billing/portal', requireAuth, (_req: AuthRequest, res: Response) => {
+    // TODO: Integrate with Stripe Customer Portal (see JSDoc above)
+    res.status(501).json({
+      error: 'Stripe integration pending — set STRIPE_SECRET_KEY and install the stripe package',
+    });
+  });
+
+  /**
+   * POST /api/billing/webhook
+   *
+   * Receives Stripe webhook events. Verifies the `stripe-signature` header
+   * using HMAC-SHA256 (manual implementation — no Stripe SDK required).
+   *
+   * Relevant events handled:
+   *  - checkout.session.completed  → activate subscription / update plan
+   *  - customer.subscription.updated → plan change (upgrade/downgrade)
+   *  - customer.subscription.deleted → revert to free plan
+   *
+   * NOTE: Express must receive the raw body for signature verification.
+   * Mount this route with `express.raw({ type: 'application/json' })` before
+   * the global `express.json()` middleware, or use the `rawBody` trick in
+   * index.ts. The router is mounted after `express.json()`, so the raw body
+   * arrives here as `req.body` already parsed. In production you should
+   * mount this endpoint separately with express.raw().
+   */
+  router.post(
+    '/billing/webhook',
+    (req: Request, res: Response) => {
+      const sig     = req.headers['stripe-signature'] as string | undefined;
+      const secret  = process.env.STRIPE_WEBHOOK_SECRET ?? '';
+
+      if (!sig || !secret) {
+        res.status(400).json({ error: 'Missing stripe-signature or webhook secret' });
+        return;
+      }
+
+      // Re-serialise the parsed body so we can verify the signature.
+      // In production, wire up express.raw() for this route for exact byte-for-byte
+      // fidelity. This is sufficient for dev / staging where the payload is ASCII-safe.
+      const payload = Buffer.isBuffer(req.body)
+        ? req.body
+        : Buffer.from(typeof req.body === 'string' ? req.body : JSON.stringify(req.body));
+
+      if (!verifyStripeWebhook(payload, sig, secret)) {
+        res.status(400).json({ error: 'Webhook signature verification failed' });
+        return;
+      }
+
+      const event = JSON.parse(payload.toString()) as { type: string; data: { object: Record<string, unknown> } };
+
+      switch (event.type) {
+        case 'checkout.session.completed': {
+          // TODO: Extract metadata.userId, look up / create Stripe customer,
+          //       update user.plan and store stripe_customer_id in the DB.
+          console.log('[billing] checkout.session.completed', event.data.object['id']);
+          break;
+        }
+        case 'customer.subscription.updated': {
+          // TODO: Map the Stripe price ID back to a plan ('free'|'pro'|'business')
+          //       and update the user row accordingly.
+          console.log('[billing] customer.subscription.updated', event.data.object['id']);
+          break;
+        }
+        case 'customer.subscription.deleted': {
+          // TODO: Revert the user to the free plan.
+          console.log('[billing] customer.subscription.deleted', event.data.object['id']);
+          break;
+        }
+        default:
+          // Unhandled event type — acknowledge receipt so Stripe doesn't retry
+          break;
+      }
+
+      res.json({ received: true });
+    }
+  );
+
   return router;
 }
 
@@ -503,4 +930,55 @@ function formatSettings(s: {
     autoAnswer: Boolean(s.auto_answer),
     updatedAt: s.updated_at,
   };
+}
+
+function formatTeam(t: {
+  id: string;
+  name: string;
+  owner_id: string;
+  plan: string;
+  created_at: number;
+}) {
+  return {
+    id: t.id,
+    name: t.name,
+    ownerId: t.owner_id,
+    plan: t.plan,
+    createdAt: t.created_at,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Stripe webhook signature verification (no SDK required)
+// ---------------------------------------------------------------------------
+
+function verifyStripeWebhook(payload: Buffer, sig: string, secret: string): boolean {
+  const parts = sig.split(',');
+  const timestampPart = parts.find((p) => p.startsWith('t='));
+  if (!timestampPart) return false;
+
+  const timestamp = timestampPart.slice(2);
+  const v1Sigs = parts
+    .filter((p) => p.startsWith('v1='))
+    .map((p) => p.slice(3));
+
+  if (v1Sigs.length === 0) return false;
+
+  const signedPayload = `${timestamp}.${payload.toString()}`;
+  const expected = crypto
+    .createHmac('sha256', secret)
+    .update(signedPayload)
+    .digest('hex');
+
+  const expectedBuf = Buffer.from(expected, 'hex');
+  return v1Sigs.some((candidate) => {
+    try {
+      const candidateBuf = Buffer.from(candidate, 'hex');
+      // Lengths must match for timingSafeEqual
+      if (candidateBuf.length !== expectedBuf.length) return false;
+      return crypto.timingSafeEqual(candidateBuf, expectedBuf);
+    } catch {
+      return false;
+    }
+  });
 }

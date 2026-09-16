@@ -101,12 +101,45 @@ export default function RemoteDisplay({ framesChannel, dataChannel, remoteScreen
     let lastFpsLog = performance.now()
     let decodedMs = 0 // rolling avg decode time (recv→draw)
 
-    // Resize canvas to match decoded frame on first frame / resolution change
-    // avc1.640033 = H.264 High Profile Level 5.1 — accepts any H.264 High output
-    // VideoToolbox uses AutoLevel so we must allow up to 5.1 here
+    // Codec strings:
+    // H.264 High Profile Level 5.1 — accepts any H.264 High output from VideoToolbox AutoLevel
+    // H.265 Main Profile Level 5.1 — accepts any HEVC Main output from VideoToolbox AutoLevel
     const H264_CODEC = 'avc1.640033'
+    const H265_CODEC = 'hvc1.1.6.L153.B0'
 
-    const decoder = new VideoDecoder({
+    // Detect codec from Annex B stream by inspecting the first NAL unit header.
+    // Returns 'h265' if an HEVC VPS (0x40) is found, 'h264' otherwise.
+    function detectCodecFromFrame(data: Uint8Array): 'h264' | 'h265' {
+      for (let i = 0; i < data.length - 5; i++) {
+        if (data[i] === 0 && data[i+1] === 0 && data[i+2] === 0 && data[i+3] === 1) {
+          // HEVC VPS NAL: forbidden_zero=0, nal_unit_type=32 → first byte = 0x40
+          if (data[i+4] === 0x40) return 'h265'
+          break // H.264 — no need to scan further
+        }
+      }
+      return 'h264'
+    }
+
+    function isKeyFrame(data: Uint8Array, codec: 'h264' | 'h265'): boolean {
+      for (let i = 0; i < data.length - 5; i++) {
+        if (data[i] === 0 && data[i+1] === 0 && data[i+2] === 0 && data[i+3] === 1) {
+          if (codec === 'h265') {
+            // HEVC: nal_unit_type = (byte >> 1) & 0x3f; VPS=32, SPS=33, IDR_W_RADL=19, IDR_N_LP=20
+            const hevcType = (data[i+4] >> 1) & 0x3f
+            if (hevcType === 19 || hevcType === 20 || hevcType === 32 || hevcType === 33) return true
+          } else {
+            // H.264: nal_unit_type = byte & 0x1f; IDR=5, SPS=7, PPS=8
+            const h264Type = data[i+4] & 0x1f
+            if (h264Type === 5 || h264Type === 7 || h264Type === 8) return true
+          }
+        }
+      }
+      return false
+    }
+
+    let activeCodec: 'h264' | 'h265' = 'h264'
+
+    const createDecoder = (codec: 'h264' | 'h265') => new VideoDecoder({
       output: (frame) => {
         const drawStart = performance.now()
         if (canvas.width !== frame.displayWidth || canvas.height !== frame.displayHeight) {
@@ -122,7 +155,7 @@ export default function RemoteDisplay({ framesChannel, dataChannel, remoteScreen
           const fps = (frameCount / ((now - lastFpsLog) / 1000)).toFixed(1)
           const dc = dcRef.current
           if (dc?.readyState === 'open') {
-            dc.send(JSON.stringify({ type: 'stats', fps: parseFloat(fps), decodeMs: Math.round(decodedMs) }))
+            dc.send(JSON.stringify({ type: 'stats', fps: parseFloat(fps), decodeMs: Math.round(decodedMs), codec }))
           }
           frameCount = 0
           lastFpsLog = now
@@ -132,10 +165,12 @@ export default function RemoteDisplay({ framesChannel, dataChannel, remoteScreen
         console.warn('[VideoDecoder] error — resetting:', err)
         try {
           decoder.reset()
-          decoder.configure({ codec: H264_CODEC, optimizeForLatency: true })
+          decoder.configure({ codec: activeCodec === 'h265' ? H265_CODEC : H264_CODEC, optimizeForLatency: true })
         } catch {}
       },
     })
+
+    let decoder = createDecoder('h264')
 
     try {
       decoder.configure({ codec: H264_CODEC, optimizeForLatency: true })
@@ -155,14 +190,25 @@ export default function RemoteDisplay({ framesChannel, dataChannel, remoteScreen
 
       const data = new Uint8Array(e.data)
 
-      // Scan Annex B start codes to detect NAL type — key if SPS(7)/PPS(8)/IDR(5) present
-      let isKey = false
-      for (let i = 0; i < data.length - 5; i++) {
-        if (data[i] === 0 && data[i+1] === 0 && data[i+2] === 0 && data[i+3] === 1) {
-          const nalType = data[i + 4] & 0x1f
-          if (nalType === 5 || nalType === 7 || nalType === 8) { isKey = true; break }
+      // Auto-detect codec switch (agent may negotiate HEVC on first keyframe)
+      const detectedCodec = detectCodecFromFrame(data)
+      if (detectedCodec !== activeCodec && decoder.state !== 'closed') {
+        console.info('[VideoDecoder] codec switch:', activeCodec, '→', detectedCodec)
+        try { decoder.close() } catch {}
+        activeCodec = detectedCodec
+        decoder = createDecoder(detectedCodec)
+        try {
+          decoder.configure({
+            codec: detectedCodec === 'h265' ? H265_CODEC : H264_CODEC,
+            optimizeForLatency: true,
+          })
+        } catch (err) {
+          console.error('[VideoDecoder] configure after codec switch failed:', err)
+          return
         }
       }
+
+      const isKey = isKeyFrame(data, activeCodec)
 
       if (decoder.state !== 'closed') {
         try {
@@ -195,6 +241,7 @@ export default function RemoteDisplay({ framesChannel, dataChannel, remoteScreen
       framesChannel.removeEventListener('message', onMessage)
       try { decoder.close() } catch {}
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [framesChannel])
 
   // Reset frame state when channel drops (avoids stale frozen/loading overlays on reconnect)

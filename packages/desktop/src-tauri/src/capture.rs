@@ -7,9 +7,14 @@
 //   list_displays() -> Vec<DisplayInfo>
 //   capture_screen_at(display_id: u32) -> Option<RgbaFrame>
 //     display_id 0 = primary / main display
+//
+//   FrameDiffer — tile-based change detection
+//     FrameDiffer::new() -> FrameDiffer
+//     FrameDiffer::diff(&mut self, rgba: &[u8], width: u32, height: u32) -> DiffResult
+//     FrameDiffer::force_reset(&mut self)
 
 pub struct RgbaFrame {
-    pub data: Vec<u8>,  // RGBA8, row-major, width*height*4 bytes
+    pub data: Vec<u8>,  // RGBA8 (or BGRX on macOS), row-major, width*height*4 bytes
     pub width: u32,
     pub height: u32,
 }
@@ -26,6 +31,160 @@ pub use macos::{list_displays, capture_screen_at};
 
 #[cfg(not(target_os = "macos"))]
 pub use fallback::{list_displays, capture_screen_at};
+
+// ── Tile-based frame differ ───────────────────────────────────────────────────
+//
+// The frame is divided into 64×64 pixel tiles. Each tile is hashed by sampling
+// 16 pixels (every 16th pixel across a 4×4 grid within the tile) and XOR-mixing
+// them with the tile's grid position. This is intentionally lightweight — the
+// goal is fast change detection, not cryptographic strength.
+//
+// changed_ratio = fraction of tiles whose hash differs from the previous frame.
+// is_static      = true when no tile changed at all.
+//
+// The caller should force a keyframe whenever changed_ratio > 0.5 (major scene
+// change) and skip encoding entirely when is_static = true.
+
+const TILE_SIZE: u32 = 64;
+
+/// Result of comparing a frame against the previous one.
+pub struct DiffResult {
+    /// Fraction of tiles that changed, in [0.0, 1.0].
+    pub changed_ratio: f32,
+    /// True when no tile changed (screen is visually static).
+    pub is_static: bool,
+}
+
+/// Tile-based perceptual frame differ. Maintains hash state across calls.
+pub struct FrameDiffer {
+    prev_hashes: Vec<u64>,
+    frame_w: u32,
+    frame_h: u32,
+}
+
+impl FrameDiffer {
+    pub fn new() -> Self {
+        Self {
+            prev_hashes: Vec::new(),
+            frame_w: 0,
+            frame_h: 0,
+        }
+    }
+
+    /// Clear hash state, forcing the next diff to treat all tiles as changed.
+    pub fn force_reset(&mut self) {
+        self.prev_hashes.clear();
+        self.frame_w = 0;
+        self.frame_h = 0;
+    }
+
+    /// Compare `rgba` (width*height*4 bytes, any RGBA/BGRX channel order — we
+    /// only care about byte values, not colour accuracy) against the previous
+    /// frame. Updates internal state for the next call.
+    pub fn diff(&mut self, rgba: &[u8], width: u32, height: u32) -> DiffResult {
+        // Resolution change → treat every tile as new
+        if width != self.frame_w || height != self.frame_h {
+            self.prev_hashes.clear();
+            self.frame_w = width;
+            self.frame_h = height;
+        }
+
+        let cols = (width  + TILE_SIZE - 1) / TILE_SIZE;
+        let rows = (height + TILE_SIZE - 1) / TILE_SIZE;
+        let total_tiles = (cols * rows) as usize;
+
+        // Ensure the hash buffer matches the tile count
+        if self.prev_hashes.len() != total_tiles {
+            self.prev_hashes.clear();
+            self.prev_hashes.resize(total_tiles, u64::MAX); // MAX → guaranteed diff on first frame
+        }
+
+        let bytes_per_row = width as usize * 4;
+        let mut changed = 0usize;
+
+        for row in 0..rows {
+            for col in 0..cols {
+                let tile_idx = (row * cols + col) as usize;
+                let hash = hash_tile(rgba, bytes_per_row, width, height, col, row);
+
+                if hash != self.prev_hashes[tile_idx] {
+                    self.prev_hashes[tile_idx] = hash;
+                    changed += 1;
+                }
+            }
+        }
+
+        let changed_ratio = changed as f32 / total_tiles as f32;
+        DiffResult {
+            changed_ratio,
+            is_static: changed == 0,
+        }
+    }
+}
+
+/// Compute a fast hash for the 64×64 tile at grid position (tile_col, tile_row).
+///
+/// Samples every 16th pixel across a 4-wide × 4-tall grid inside the tile
+/// (16 samples total), XOR-mixed with the tile's position for uniqueness.
+/// The BGRX→RGBA channel swap is intentionally skipped — we only need
+/// consistency between frames for the same display, not colour accuracy.
+#[inline]
+fn hash_tile(
+    rgba: &[u8],
+    bytes_per_row: usize,
+    frame_w: u32,
+    frame_h: u32,
+    tile_col: u32,
+    tile_row: u32,
+) -> u64 {
+    // Pixel-space extents of this tile (may be clipped at frame edges)
+    let px_x0 = tile_col * TILE_SIZE;
+    let py_y0 = tile_row  * TILE_SIZE;
+    let px_x1 = (px_x0 + TILE_SIZE).min(frame_w);
+    let py_y1 = (py_y0 + TILE_SIZE).min(frame_h);
+
+    let tile_w = (px_x1 - px_x0) as usize;
+    let tile_h = (py_y1 - py_y0) as usize;
+
+    // Sample 4 evenly-spaced columns and 4 rows within the tile.
+    // For very small edge tiles (< 4 px in either dimension) we step by 1.
+    let step_x = (tile_w  / 4).max(1);
+    let step_y = (tile_h / 4).max(1);
+
+    // Seed with tile position so two identical tiles at different locations
+    // hash differently, preventing false "no-change" when content shifts.
+    let mut h: u64 = (tile_col as u64)
+        .wrapping_mul(2654435761)
+        ^ (tile_row as u64).wrapping_mul(2246822519);
+
+    let y0 = py_y0 as usize;
+    let x0 = px_x0 as usize;
+
+    let mut sy = 0usize;
+    while sy < tile_h {
+        let row_off = (y0 + sy) * bytes_per_row;
+        let mut sx = 0usize;
+        while sx < tile_w {
+            let byte_off = row_off + (x0 + sx) * 4;
+            if byte_off + 3 < rgba.len() {
+                // Combine all four channels into a single u32 then mix into h
+                let pixel = u32::from_le_bytes([
+                    rgba[byte_off],
+                    rgba[byte_off + 1],
+                    rgba[byte_off + 2],
+                    rgba[byte_off + 3],
+                ]) as u64;
+                h ^= pixel.wrapping_mul(6364136223846793005)
+                         .wrapping_add(1442695040888963407);
+                h = h.rotate_left(17);
+            }
+            sx += step_x;
+        }
+        sy += step_y;
+    }
+
+    h
+}
 
 // ── macOS ─────────────────────────────────────────────────────────────────────
 

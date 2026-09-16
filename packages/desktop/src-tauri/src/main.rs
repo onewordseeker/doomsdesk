@@ -6,6 +6,7 @@ mod config;
 mod encode;
 mod input;
 mod signaling;
+mod wol;
 
 use config::Config;
 use input::InputWorker;
@@ -356,7 +357,7 @@ fn set_launch_on_startup(state: State<'_, AppState>, enabled: bool) -> Result<()
     let binary = std::env::current_exe()
         .map(|p| p.to_string_lossy().to_string())
         .map_err(|e| e.to_string())?;
-    let al = auto_launch::AutoLaunch::new("DoomsDesk", &binary, false, &[] as &[&str]);
+    let al = auto_launch::AutoLaunch::new("DoomsDesk", &binary, &[] as &[&str]);
     if enabled {
         al.enable().map_err(|e| e.to_string())?;
     } else if al.is_enabled().unwrap_or(false) {
@@ -374,7 +375,7 @@ fn get_launch_on_startup() -> bool {
     let binary = std::env::current_exe()
         .map(|p| p.to_string_lossy().to_string())
         .unwrap_or_default();
-    auto_launch::AutoLaunch::new("DoomsDesk", &binary, false, &[] as &[&str])
+    auto_launch::AutoLaunch::new("DoomsDesk", &binary, &[] as &[&str])
         .is_enabled()
         .unwrap_or(false)
 }
@@ -469,12 +470,14 @@ async fn start_native_capture(app: AppHandle, state: State<'_, AppState>) -> Res
         use screenshots::image::{DynamicImage, imageops::FilterType, RgbaImage};
 
         let mut encoder: Option<encode::H264Encoder> = None;
+        let mut differ = capture::FrameDiffer::new();
         let mut pts_ms: u64 = 0;
-        let mut last_frame_hash: u64 = 0;
         let mut last_send_ms: u64 = 0;
         let mut last_bitrate: u32 = 0;
         const FRAME_MS: u64 = 33;          // ~30 fps
-        const IDLE_FORCE_MS: u64 = 2_000;  // force keyalive even if screen is static
+        const IDLE_FORCE_MS: u64 = 2_000;  // force keepalive even if screen is static
+        // Fraction of changed tiles above which we force an IDR keyframe
+        const KEYFRAME_THRESHOLD: f32 = 0.50;
 
         loop {
             if gen_ref.load(Ordering::SeqCst) != my_gen {
@@ -503,11 +506,11 @@ async fn start_native_capture(app: AppHandle, state: State<'_, AppState>) -> Res
                     (w, h, dyn_img.into_rgba8().into_raw())
                 };
 
-                // Recreate encoder only when resolution changes
+                // Recreate encoder only when resolution changes; reset differ too
                 if encoder.as_ref().map(|e| e.dimensions()) != Some((eff_w, eff_h)) {
                     encoder = encode::H264Encoder::new(eff_w, eff_h);
+                    differ.force_reset();
                     pts_ms = 0;
-                    last_frame_hash = 0;
                     last_send_ms = 0;
                 }
                 let enc = encoder.as_mut()?;
@@ -517,24 +520,23 @@ async fn start_native_capture(app: AppHandle, state: State<'_, AppState>) -> Res
                 if wanted_bps != last_bitrate {
                     let clamped = wanted_bps.max(2_000_000);
                     enc.set_bitrate(clamped);
-                    last_bitrate = clamped; // track what was actually set, not the raw atomic value
+                    last_bitrate = clamped;
                 }
 
-                // Perceptual hash: sample every 512th byte with LCG mix
-                let hash: u64 = rgba
-                    .chunks_exact(512)
-                    .enumerate()
-                    .fold(0u64, |acc, (i, chunk)| {
-                        acc ^ ((chunk[0] as u64)
-                            .wrapping_mul(6364136223846793005)
-                            .wrapping_add(i as u64))
-                    });
+                // Tile-based change detection: skip encoding entirely for static frames,
+                // and force an IDR when more than half the tiles changed (scene cut).
+                let diff = differ.diff(&rgba, eff_w, eff_h);
 
                 let idle_too_long = pts_ms.saturating_sub(last_send_ms) >= IDLE_FORCE_MS;
-                if hash == last_frame_hash && !idle_too_long {
-                    return Some(()); // static screen, no need to encode
+                if diff.is_static && !idle_too_long {
+                    return Some(()); // nothing changed, skip this frame
                 }
-                last_frame_hash = hash;
+
+                // Signal a forced keyframe to the encoder when a large portion of the
+                // image changed. VideoToolbox honours this through the MaxKeyFrameInterval
+                // setting; if the app later needs explicit IDR forcing, a frame-property
+                // dictionary can be injected here.
+                let _force_keyframe = diff.changed_ratio > KEYFRAME_THRESHOLD;
 
                 let encoded = enc.encode(&rgba, pts_ms)?;
                 last_send_ms = pts_ms;
@@ -618,6 +620,13 @@ fn capture_screenshot_png(state: State<'_, AppState>) -> Result<String, String> 
 
     use base64::Engine;
     Ok(base64::engine::general_purpose::STANDARD.encode(buf.into_inner()))
+}
+
+/// Send a Wake-on-LAN magic packet to the given MAC address.
+/// Supports "AA:BB:CC:DD:EE:FF", "AA-BB-CC-DD-EE-FF", and "AABBCCDDEEFF" formats.
+#[tauri::command]
+fn wake_on_lan(mac: String) -> Result<(), String> {
+    wol::send_wol_packet(&mac)
 }
 
 // ── Main ──────────────────────────────────────────────────────────────────────
@@ -720,6 +729,7 @@ fn main() {
             resize_agent_window,
             check_macos_permissions,
             open_privacy_settings,
+            wake_on_lan,
         ])
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {

@@ -1,0 +1,53 @@
+name: Build & Test Server
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'packages/server/**'
+      - 'packages/web/**'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'packages/server/**'
+      - 'packages/web/**'
+
+jobs:
+  test-server:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v3
+        with:
+          version: 9
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'pnpm'
+      - name: Install dependencies
+        working-directory: packages/server
+        run: pnpm install
+      - name: Type check
+        working-directory: packages/server
+        run: pnpm exec tsc --noEmit
+      - name: Build
+        working-directory: packages/server
+        run: pnpm build
+
+  test-web:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'npm'
+      - name: Install dependencies
+        working-directory: packages/web
+        run: npm install
+      - name: Type check
+        working-directory: packages/web
+        run: npx tsc --noEmit
+      - name: Build
+        working-directory: packages/web
+        run: npm run build

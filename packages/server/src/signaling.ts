@@ -7,7 +7,9 @@ import {
   touchDeviceLastSeen,
   createSession,
   endSession,
+  createAuditLog,
 } from './db.js';
+import { wsConnectLimiter } from './ratelimit.js';
 
 // ---------------------------------------------------------------------------
 // Message type definitions (Client → Server)
@@ -46,6 +48,8 @@ interface PeerState {
   permanentPasswordHash: string | null;
   /** plain random/session password sent on register */
   randomPassword: string;
+  /** remote IP address of this WebSocket connection */
+  remoteIp: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -71,8 +75,20 @@ export class SignalingServer {
   // Connection lifecycle
   // -------------------------------------------------------------------------
 
-  private onConnection(ws: WebSocket, _req: IncomingMessage): void {
-    const state: PeerState = { deviceId: '', peerId: null, sessionId: null, permanentPasswordHash: null, randomPassword: '' };
+  private onConnection(ws: WebSocket, req: IncomingMessage): void {
+    const remoteIp =
+      (req.headers['x-forwarded-for'] as string | undefined)?.split(',')[0]?.trim() ??
+      req.socket.remoteAddress ??
+      'unknown';
+
+    const state: PeerState = {
+      deviceId: '',
+      peerId: null,
+      sessionId: null,
+      permanentPasswordHash: null,
+      randomPassword: '',
+      remoteIp,
+    };
     this.state.set(ws, state);
 
     ws.on('message', (raw) => {
@@ -94,11 +110,27 @@ export class SignalingServer {
     if (state.deviceId) {
       this.online.delete(state.deviceId);
       console.log(`[signaling] device offline: ${state.deviceId}`);
+      createAuditLog(
+        null,
+        state.deviceId,
+        'device_disconnected',
+        'device',
+        undefined,
+        state.remoteIp
+      );
     }
 
     // End active session and notify peer
     if (state.peerId && state.sessionId) {
       endSession(state.sessionId);
+      createAuditLog(
+        null,
+        state.deviceId,
+        'session_ended',
+        'session',
+        `sessionId=${state.sessionId} peer=${state.peerId}`,
+        state.remoteIp
+      );
       const peerWs = this.online.get(state.peerId);
       if (peerWs) {
         this.send(peerWs, { type: 'peer_disconnected' });
@@ -157,6 +189,14 @@ export class SignalingServer {
     touchDeviceLastSeen(deviceId);
 
     console.log(`[signaling] device online: ${deviceId}`);
+    createAuditLog(
+      null,
+      deviceId,
+      'device_connected',
+      'device',
+      undefined,
+      state.remoteIp
+    );
     this.send(ws, { type: 'registered', deviceId, randomPassword: state.randomPassword });
   }
 
@@ -167,6 +207,16 @@ export class SignalingServer {
   private onConnect(ws: WebSocket, state: PeerState, msg: MsgConnect): void {
     if (!state.deviceId) {
       return this.send(ws, { type: 'error', message: 'Not registered' });
+    }
+
+    // Rate-limit connection attempts: 5 per minute per source device
+    const rateLimitKey = `connect:${state.deviceId}`;
+    if (!wsConnectLimiter.check(rateLimitKey, 5, 60_000)) {
+      const retryMs = wsConnectLimiter.retryAfterMs(rateLimitKey);
+      return this.send(ws, {
+        type: 'error',
+        message: `Too many connection attempts. Retry in ${Math.ceil(retryMs / 1000)}s.`,
+      });
     }
 
     const targetWs = this.online.get(msg.targetId);
@@ -194,7 +244,15 @@ export class SignalingServer {
       if (dbDevice?.permanent_password_hash && bcrypt.compareSync(msg.password, dbDevice.permanent_password_hash)) {
         return this.establishSession(ws, state, targetWs, msg.targetId);
       }
-      // Wrong password
+      // Wrong password — log auth failure
+      createAuditLog(
+        null,
+        state.deviceId,
+        'auth_failed',
+        `device:${msg.targetId}`,
+        'Incorrect password on connect attempt',
+        state.remoteIp
+      );
       return this.send(ws, { type: 'connect_result', approved: false, reason: 'Incorrect password' });
     }
 
@@ -254,6 +312,15 @@ export class SignalingServer {
       `[signaling] session ${sessionId}: ${controllerState.deviceId} → ${agentDeviceId}`
     );
 
+    createAuditLog(
+      null,
+      controllerState.deviceId,
+      'session_started',
+      'session',
+      `sessionId=${sessionId} target=${agentDeviceId}`,
+      controllerState.remoteIp
+    );
+
     // Notify controller (session approved, with agent's device ID for WebRTC targeting)
     this.send(controllerWs, { type: 'connect_result', approved: true, peerId: agentDeviceId });
     // Notify agent (session started, so it can open session window)
@@ -308,7 +375,16 @@ export class SignalingServer {
     const targetWs = this.online.get(msg.targetId);
 
     if (state.sessionId) {
-      endSession(state.sessionId);
+      const endedSessionId = state.sessionId;
+      endSession(endedSessionId);
+      createAuditLog(
+        null,
+        state.deviceId,
+        'session_ended',
+        'session',
+        `sessionId=${endedSessionId} peer=${msg.targetId}`,
+        state.remoteIp
+      );
       state.sessionId = null;
     }
 

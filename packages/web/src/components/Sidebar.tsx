@@ -11,6 +11,8 @@ import {
   LogOut,
   Zap,
   ChevronRight,
+  Users,
+  Shield,
   type LucideProps,
 } from 'lucide-react';
 import { ThemeToggle } from './ThemeToggle';
@@ -29,7 +31,9 @@ interface NavItem {
 const NAV_ITEMS: NavItem[] = [
   { href: '/dashboard', label: 'Dashboard', icon: LayoutDashboard },
   { href: '/devices', label: 'Devices', icon: Monitor },
+  { href: '/teams', label: 'Teams', icon: Users },
   { href: '/sessions', label: 'Sessions', icon: Clock },
+  { href: '/audit', label: 'Audit Log', icon: Shield },
   { href: '/billing', label: 'Billing', icon: CreditCard },
   { href: '/settings', label: 'Settings', icon: Settings },
 ];

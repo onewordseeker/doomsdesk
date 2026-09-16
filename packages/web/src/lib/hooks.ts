@@ -11,6 +11,8 @@ import {
   getMyBilling,
   getPlans,
   getSettings,
+  getTeams,
+  getAuditLogs,
   logout,
   type User,
   type Device,
@@ -20,6 +22,8 @@ import {
   type Plan,
   type Settings,
   type PaginatedResponse,
+  type Team,
+  type AuditLog,
 } from './api';
 
 // ─── useAuth ──────────────────────────────────────────────────────────────────
@@ -160,6 +164,62 @@ export function useSettings() {
   }, []);
 
   return { settings, setSettings, loading, error };
+}
+
+// ─── useTeams ─────────────────────────────────────────────────────────────────
+
+export function useTeams() {
+  const [teams, setTeams] = useState<Team[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+
+  const fetchTeams = useCallback(async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      const data = await getTeams();
+      setTeams(data.teams);
+    } catch (err) {
+      setError((err as Error).message);
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    fetchTeams();
+  }, [fetchTeams]);
+
+  return { teams, loading, error, refresh: fetchTeams };
+}
+
+// ─── useAuditLogs ─────────────────────────────────────────────────────────────
+
+export function useAuditLogs(page = 1) {
+  const [logs, setLogs] = useState<AuditLog[]>([]);
+  const [pagination, setPagination] = useState<{ page: number; limit: number; total: number; pages: number } | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+
+  const fetchLogs = useCallback(async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      const data = await getAuditLogs(page, 20);
+      setLogs(data.logs);
+      setPagination(data.pagination);
+    } catch (err) {
+      setError((err as Error).message);
+    } finally {
+      setLoading(false);
+    }
+  }, [page]);
+
+  useEffect(() => {
+    fetchLogs();
+  }, [fetchLogs]);
+
+  return { logs, pagination, loading, error };
 }
 
 // ─── useToast ─────────────────────────────────────────────────────────────────

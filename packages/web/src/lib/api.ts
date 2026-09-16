@@ -87,6 +87,35 @@ export interface DashboardStats {
   recentSessions: Session[];
 }
 
+export interface Team {
+  id: string;
+  name: string;
+  ownerId: string;
+  plan: string;
+  createdAt: number;
+}
+
+export interface TeamMember {
+  teamId: string;
+  userId: string;
+  role: 'owner' | 'admin' | 'member' | 'viewer';
+  invitedAt: number;
+  // enriched by server
+  email?: string;
+  name?: string;
+}
+
+export interface AuditLog {
+  id: number;
+  userId: string | null;
+  deviceId: string | null;
+  action: string;
+  resource: string | null;
+  detail: string | null;
+  ip: string | null;
+  createdAt: number;
+}
+
 // ─── Core fetch wrapper ───────────────────────────────────────────────────────
 
 async function request<T>(
@@ -238,4 +267,55 @@ export async function updateSettings(
     body: JSON.stringify(data),
   });
   return r.settings;
+}
+
+// ─── Teams ────────────────────────────────────────────────────────────────────
+
+export async function getTeams(): Promise<{ teams: Team[] }> {
+  return request<{ teams: Team[] }>('/teams');
+}
+
+export async function createTeam(name: string): Promise<{ team: Team }> {
+  return request<{ team: Team }>('/teams', {
+    method: 'POST',
+    body: JSON.stringify({ name }),
+  });
+}
+
+export async function deleteTeam(teamId: string): Promise<void> {
+  return request(`/teams/${teamId}`, { method: 'DELETE' });
+}
+
+export async function getTeamMembers(teamId: string): Promise<{ members: TeamMember[] }> {
+  return request<{ members: TeamMember[] }>(`/teams/${teamId}/members`);
+}
+
+export async function inviteTeamMember(teamId: string, email: string, role: string): Promise<{ member: TeamMember }> {
+  return request<{ member: TeamMember }>(`/teams/${teamId}/members`, {
+    method: 'POST',
+    body: JSON.stringify({ email, role }),
+  });
+}
+
+export async function removeTeamMember(teamId: string, userId: string): Promise<void> {
+  return request(`/teams/${teamId}/members/${userId}`, { method: 'DELETE' });
+}
+
+export async function updateMemberRole(teamId: string, userId: string, role: string): Promise<{ member: TeamMember }> {
+  return request<{ member: TeamMember }>(`/teams/${teamId}/members/${userId}`, {
+    method: 'PATCH',
+    body: JSON.stringify({ role }),
+  });
+}
+
+// ─── Audit Logs ───────────────────────────────────────────────────────────────
+
+export async function getAuditLogs(
+  page = 1,
+  limit = 20
+): Promise<{ logs: AuditLog[]; pagination: { page: number; limit: number; total: number; pages: number } }> {
+  const params = new URLSearchParams({ page: String(page), limit: String(limit) });
+  return request<{ logs: AuditLog[]; pagination: { page: number; limit: number; total: number; pages: number } }>(
+    `/audit?${params.toString()}`
+  );
 }

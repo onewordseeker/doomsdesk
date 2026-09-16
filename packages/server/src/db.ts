@@ -64,6 +64,37 @@ function initSchema(db: Database.Database): void {
     CREATE INDEX IF NOT EXISTS idx_devices_user_id   ON devices(user_id);
     CREATE INDEX IF NOT EXISTS idx_sessions_devices  ON sessions(controller_device_id, target_device_id);
     CREATE INDEX IF NOT EXISTS idx_sessions_started  ON sessions(started_at DESC);
+
+    CREATE TABLE IF NOT EXISTS audit_logs (
+      id         INTEGER PRIMARY KEY AUTOINCREMENT,
+      user_id    TEXT,
+      device_id  TEXT,
+      action     TEXT NOT NULL,
+      resource   TEXT,
+      detail     TEXT,
+      ip         TEXT,
+      created_at INTEGER NOT NULL DEFAULT (unixepoch())
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_audit_user ON audit_logs(user_id, created_at DESC);
+
+    CREATE TABLE IF NOT EXISTS teams (
+      id         TEXT PRIMARY KEY,
+      name       TEXT NOT NULL,
+      owner_id   TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      plan       TEXT NOT NULL DEFAULT 'free',
+      created_at INTEGER NOT NULL DEFAULT (unixepoch())
+    );
+
+    CREATE TABLE IF NOT EXISTS team_members (
+      team_id    TEXT NOT NULL REFERENCES teams(id) ON DELETE CASCADE,
+      user_id    TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      role       TEXT NOT NULL DEFAULT 'member',
+      invited_at INTEGER NOT NULL DEFAULT (unixepoch()),
+      PRIMARY KEY (team_id, user_id)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_team_members_user ON team_members(user_id);
   `);
 }
 
@@ -105,6 +136,32 @@ export interface DbUserSettings {
   notifications: number;
   auto_answer: number;
   updated_at: number;
+}
+
+export interface DbAuditLog {
+  id: number;
+  user_id: string | null;
+  device_id: string | null;
+  action: string;
+  resource: string | null;
+  detail: string | null;
+  ip: string | null;
+  created_at: number;
+}
+
+export interface DbTeam {
+  id: string;
+  name: string;
+  owner_id: string;
+  plan: string;
+  created_at: number;
+}
+
+export interface DbTeamMember {
+  team_id: string;
+  user_id: string;
+  role: string;
+  invited_at: number;
 }
 
 // ---------------------------------------------------------------------------
@@ -342,4 +399,145 @@ export function upsertUserSettings(
   `).run(userId, theme, notifications ? 1 : 0, autoAnswer ? 1 : 0);
 
   return getUserSettings(userId)!;
+}
+
+// ---------------------------------------------------------------------------
+// Audit log queries
+// ---------------------------------------------------------------------------
+
+export function createAuditLog(
+  userId: string | null,
+  deviceId: string | null,
+  action: string,
+  resource?: string,
+  detail?: string,
+  ip?: string
+): void {
+  getDb().prepare(
+    `INSERT INTO audit_logs (user_id, device_id, action, resource, detail, ip)
+     VALUES (?, ?, ?, ?, ?, ?)`
+  ).run(
+    userId ?? null,
+    deviceId ?? null,
+    action,
+    resource ?? null,
+    detail ?? null,
+    ip ?? null
+  );
+}
+
+export function getAuditLogs(
+  userId: string,
+  page: number,
+  limit: number
+): { logs: DbAuditLog[]; total: number } {
+  const db = getDb();
+  const offset = (page - 1) * limit;
+
+  const logs = db.prepare<[string, number, number], DbAuditLog>(
+    `SELECT * FROM audit_logs WHERE user_id = ? ORDER BY created_at DESC LIMIT ? OFFSET ?`
+  ).all(userId, limit, offset);
+
+  const { total } = db.prepare<[string], { total: number }>(
+    `SELECT COUNT(*) AS total FROM audit_logs WHERE user_id = ?`
+  ).get(userId)!;
+
+  return { logs, total };
+}
+
+// ---------------------------------------------------------------------------
+// Team queries
+// ---------------------------------------------------------------------------
+
+export function createTeam(id: string, name: string, ownerId: string): DbTeam {
+  const db = getDb();
+  db.prepare(
+    `INSERT INTO teams (id, name, owner_id) VALUES (?, ?, ?)`
+  ).run(id, name, ownerId);
+
+  // Auto-add the creator as owner member
+  db.prepare(
+    `INSERT INTO team_members (team_id, user_id, role) VALUES (?, ?, 'owner')`
+  ).run(id, ownerId);
+
+  return getTeamById(id)!;
+}
+
+export function getTeamById(id: string): DbTeam | undefined {
+  return getDb().prepare<[string], DbTeam>(
+    `SELECT * FROM teams WHERE id = ?`
+  ).get(id);
+}
+
+export function getTeamsByUserId(userId: string): DbTeam[] {
+  return getDb().prepare<[string], DbTeam>(`
+    SELECT t.*
+    FROM teams t
+    INNER JOIN team_members tm ON tm.team_id = t.id
+    WHERE tm.user_id = ?
+    ORDER BY t.created_at DESC
+  `).all(userId);
+}
+
+export function addTeamMember(teamId: string, userId: string, role: string): void {
+  getDb().prepare(
+    `INSERT INTO team_members (team_id, user_id, role) VALUES (?, ?, ?)
+     ON CONFLICT(team_id, user_id) DO UPDATE SET role = excluded.role`
+  ).run(teamId, userId, role);
+}
+
+export function removeTeamMember(teamId: string, userId: string): boolean {
+  const result = getDb().prepare(
+    `DELETE FROM team_members WHERE team_id = ? AND user_id = ?`
+  ).run(teamId, userId);
+  return result.changes > 0;
+}
+
+export function updateMemberRole(teamId: string, userId: string, role: string): boolean {
+  const result = getDb().prepare(
+    `UPDATE team_members SET role = ? WHERE team_id = ? AND user_id = ?`
+  ).run(role, teamId, userId);
+  return result.changes > 0;
+}
+
+export function getTeamMembers(teamId: string): (DbTeamMember & { email: string; name: string })[] {
+  return getDb().prepare<[string], DbTeamMember & { email: string; name: string }>(`
+    SELECT tm.*, u.email, u.name
+    FROM team_members tm
+    INNER JOIN users u ON u.id = tm.user_id
+    WHERE tm.team_id = ?
+    ORDER BY tm.invited_at ASC
+  `).all(teamId);
+}
+
+export function getMemberRole(teamId: string, userId: string): string | null {
+  const row = getDb().prepare<[string, string], { role: string }>(
+    `SELECT role FROM team_members WHERE team_id = ? AND user_id = ?`
+  ).get(teamId, userId);
+  return row?.role ?? null;
+}
+
+export function updateTeamName(id: string, name: string): DbTeam | undefined {
+  const result = getDb().prepare(
+    `UPDATE teams SET name = ? WHERE id = ?`
+  ).run(name, id);
+  if (result.changes === 0) return undefined;
+  return getTeamById(id);
+}
+
+export function deleteTeam(id: string): boolean {
+  const result = getDb().prepare(`DELETE FROM teams WHERE id = ?`).run(id);
+  return result.changes > 0;
+}
+
+// ---------------------------------------------------------------------------
+// Role permission helpers
+// ---------------------------------------------------------------------------
+
+export function canManageTeam(role: string): boolean {
+  return role === 'owner' || role === 'admin';
+}
+
+export function canViewTeam(role: string): boolean {
+  return ['owner', 'admin', 'member', 'viewer'].includes(role);
 }
