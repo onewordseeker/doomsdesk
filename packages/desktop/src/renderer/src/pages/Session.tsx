@@ -87,6 +87,7 @@ export default function Session({ peerId, role, onEnd }: Props) {
   const [dragOver, setDragOver] = useState(false)
   const [pointerLockEnabled, setPointerLockEnabled] = useState(false)
   const [showShortcuts, setShowShortcuts] = useState(false)
+  const [toast, setToast] = useState<string | null>(null)
   const [remoteAudioEl] = useState(() => {
     const el = document.createElement('audio')
     el.autoplay = true
@@ -137,6 +138,11 @@ export default function Session({ peerId, role, onEnd }: Props) {
       cleanup()
       onEnd()
     })
+
+    const unsubFileSaved = listen<{ name: string; path: string }>('file-saved', (e) => {
+      setToast(`Saved: ${e.payload.name}`)
+      setTimeout(() => setToast(null), 3500)
+    })
     const unsubAgentLog = role === 'controller'
       ? listen<string>('agent-log', (e) => {
           setDiagLines((prev) => [...prev.slice(-40), e.payload])
@@ -147,6 +153,7 @@ export default function Session({ peerId, role, onEnd }: Props) {
       unsubSignal.then((f) => f())
       unsubEnd.then((f) => f())
       unsubAgentLog.then((f) => f())
+      unsubFileSaved.then((f) => f())
       cleanup()
     }
   }, [])
@@ -1252,6 +1259,16 @@ export default function Session({ peerId, role, onEnd }: Props) {
             <button onClick={() => sendChat(chatInput)} className="p-1.5 text-slate-400 hover:text-brand">
               <Send size={12} />
             </button>
+          </div>
+        </div>
+      )}
+
+      {/* Toast notification */}
+      {toast && (
+        <div className="absolute top-14 left-1/2 -translate-x-1/2 z-30 pointer-events-none">
+          <div className="flex items-center gap-2 bg-surface border border-emerald-500/30 rounded-lg px-4 py-2 shadow-xl">
+            <div className="w-1.5 h-1.5 rounded-full bg-emerald-400" />
+            <span className="text-xs text-emerald-400 font-medium">{toast}</span>
           </div>
         </div>
       )}

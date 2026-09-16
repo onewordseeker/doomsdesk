@@ -53,6 +53,9 @@ fn set_config(state: State<'_, AppState>, partial: Value) {
     if let Some(url) = partial.get("serverUrl").and_then(|v| v.as_str()) {
         cfg.server_url = url.to_string();
     }
+    if let Some(url) = partial.get("webUrl").and_then(|v| v.as_str()) {
+        cfg.web_url = url.to_string();
+    }
     if let Some(v) = partial.get("startMinimized").and_then(|v| v.as_bool()) {
         cfg.start_minimized = v;
     }
@@ -181,9 +184,43 @@ fn forward_agent_log(app: AppHandle, msg: String) {
     let _ = app.emit("agent-log", msg);
 }
 
-/// Save a file received from the remote side — shows native save dialog.
+/// Save a file received from the remote side.
+/// Tries to auto-save to ~/Downloads/{name}; falls back to native save dialog if unavailable.
 #[tauri::command]
 async fn save_received_file(app: AppHandle, name: String, data: Vec<u8>) -> Result<(), String> {
+    // Prefer auto-save to Downloads folder to avoid blocking dialog for each file
+    let downloads = dirs::download_dir()
+        .or_else(|| dirs::home_dir().map(|h| h.join("Downloads")));
+
+    if let Some(dir) = downloads {
+        if dir.exists() {
+            // Avoid overwriting: append a counter if file already exists
+            let mut dest = dir.join(&name);
+            let stem = std::path::Path::new(&name)
+                .file_stem().and_then(|s| s.to_str()).unwrap_or(&name);
+            let ext = std::path::Path::new(&name)
+                .extension().and_then(|s| s.to_str()).unwrap_or("");
+            let mut counter = 1u32;
+            while dest.exists() {
+                let new_name = if ext.is_empty() {
+                    format!("{} ({})", stem, counter)
+                } else {
+                    format!("{} ({}).{}", stem, counter, ext)
+                };
+                dest = dir.join(new_name);
+                counter += 1;
+            }
+            std::fs::write(&dest, &data).map_err(|e| e.to_string())?;
+            // Notify the frontend where the file was saved
+            let _ = app.emit("file-saved", serde_json::json!({
+                "name": name,
+                "path": dest.to_string_lossy(),
+            }));
+            return Ok(());
+        }
+    }
+
+    // Fallback: show native save dialog
     use tauri_plugin_dialog::DialogExt;
     let path = app.dialog().file().set_file_name(&name).blocking_save_file();
     if let Some(p) = path {

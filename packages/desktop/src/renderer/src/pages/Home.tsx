@@ -55,6 +55,7 @@ export default function Home() {
   const [incomingConn, setIncomingConn] = useState<{ sourceId: string } | null>(null)
   const [recentDevices, setRecentDevices] = useState<RecentDevice[]>(loadRecents)
   const [serverRtt, setServerRtt] = useState<number | null>(null)
+  const [webUrl, setWebUrl] = useState('https://doomsdesk.hamidentifier.cloud')
   const pollRef = useRef<ReturnType<typeof setInterval>>()
 
   // Refs so the stale signaling-message closure can read current form values
@@ -116,12 +117,13 @@ export default function Home() {
       invoke<string>('get_device_id'),
       invoke<string>('get_random_password'),
       invoke<boolean>('is_server_connected'),
-      invoke<{ permanentPassword: string }>('get_config'),
+      invoke<{ permanentPassword: string; webUrl?: string }>('get_config'),
     ])
     setDeviceId(id)
     if (pw) setRandomPw(pw)
     setServerOnline(online)
     setPermPw(config.permanentPassword ?? '')
+    if (config.webUrl) setWebUrl(config.webUrl)
   }
 
   function copy(text: string, type: 'id' | 'pw') {
@@ -257,7 +259,7 @@ export default function Home() {
           </div>
 
           <button
-            onClick={() => invoke('open_external', { url: 'https://doomsdesk.hamidentifier.cloud' })}
+            onClick={() => invoke('open_external', { url: webUrl })}
             className="mt-auto flex items-center gap-2 text-xs text-slate-500 hover:text-brand transition-colors"
           >
             <Globe size={12} />
@@ -447,18 +449,20 @@ export default function Home() {
 function SettingsOverlay({ onClose }: { onClose: () => void }) {
   const [config, setConfigState] = useState<Record<string, unknown>>({})
   const [serverUrl, setServerUrl] = useState('')
+  const [webUrl, setWebUrl] = useState('')
   const [startMinimized, setStartMinimized] = useState(false)
 
   useEffect(() => {
     invoke<Record<string, unknown>>('get_config').then((c) => {
       setConfigState(c)
       setServerUrl(c.serverUrl as string)
+      setWebUrl((c.webUrl as string) ?? 'https://doomsdesk.hamidentifier.cloud')
       setStartMinimized(!!(c.startMinimized))
     })
   }, [])
 
   async function save() {
-    await invoke('set_config', { partial: { serverUrl, startMinimized } })
+    await invoke('set_config', { partial: { serverUrl, webUrl, startMinimized } })
     onClose()
   }
 
@@ -474,10 +478,18 @@ function SettingsOverlay({ onClose }: { onClose: () => void }) {
         <h3 className="text-base font-semibold text-white mb-4">Settings</h3>
         <div className="space-y-4">
           <div>
-            <label className="text-xs text-slate-400 mb-1.5 block">Server URL</label>
+            <label className="text-xs text-slate-400 mb-1.5 block">Signaling Server URL</label>
             <input
               value={serverUrl}
               onChange={(e) => setServerUrl(e.target.value)}
+              className="w-full bg-bg border border-surface-border rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-brand"
+            />
+          </div>
+          <div>
+            <label className="text-xs text-slate-400 mb-1.5 block">Web Console URL</label>
+            <input
+              value={webUrl}
+              onChange={(e) => setWebUrl(e.target.value)}
               className="w-full bg-bg border border-surface-border rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-brand"
             />
           </div>
