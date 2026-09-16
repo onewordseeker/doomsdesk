@@ -49,7 +49,7 @@ export default function Home() {
   const [rememberPw, setRememberPw] = useState(false)
   const [connecting, setConnecting] = useState(false)
   const [connectError, setConnectError] = useState('')
-  const [copyFeedback, setCopyFeedback] = useState<'id' | 'pw' | null>(null)
+  const [copyFeedback, setCopyFeedback] = useState<'id' | 'pw' | 'invite' | null>(null)
   const [activeTab, setActiveTab] = useState<'control' | 'receive'>('control')
   const [showSettings, setShowSettings] = useState(false)
   const [incomingConn, setIncomingConn] = useState<{ sourceId: string } | null>(null)
@@ -140,7 +140,7 @@ export default function Home() {
     setPerms(p)
   }
 
-  function copy(text: string, type: 'id' | 'pw') {
+  function copy(text: string, type: 'id' | 'pw' | 'invite') {
     navigator.clipboard.writeText(text)
     setCopyFeedback(type)
     setTimeout(() => setCopyFeedback(null), 1500)
@@ -510,6 +510,16 @@ export default function Home() {
                     </div>
                   </div>
                 </div>
+                <button
+                  onClick={() => copy(
+                    `DoomsDesk — connect to me:\nDevice ID: ${formatId(deviceId)}\nPassword: ${randomPw}`,
+                    'invite'
+                  )}
+                  className="flex items-center gap-2 px-4 py-2 bg-brand/10 border border-brand/30 text-brand text-sm rounded-xl hover:bg-brand/20 transition-colors"
+                >
+                  <Copy size={13} />
+                  {copyFeedback === 'invite' ? 'Copied!' : 'Copy Invitation'}
+                </button>
                 <div className="text-xs text-slate-600 text-center max-w-xs">
                   A banner will appear on your screen during the session. Click <span className="text-slate-400">End</span> to disconnect at any time.
                 </div>
