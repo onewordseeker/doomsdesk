@@ -328,8 +328,8 @@ async fn start_native_capture(app: AppHandle, state: State<'_, AppState>) -> Res
 
                 // Live bitrate adaptation — no encoder recreation needed on macOS
                 let wanted_bps = bitrate_ref.load(Ordering::Relaxed);
-                if wanted_bps != last_bitrate && wanted_bps > 0 {
-                    enc.set_bitrate(wanted_bps);
+                if wanted_bps != last_bitrate {
+                    enc.set_bitrate(wanted_bps.max(2_000_000));
                     last_bitrate = wanted_bps;
                 }
 
@@ -472,7 +472,7 @@ fn main() {
                 permanent_password: Mutex::new(perm_pw.clone()),
                 capture_generation: Arc::new(AtomicU64::new(0)),
                 capture_quality: Arc::new(AtomicU8::new(60)),
-                capture_bitrate: Arc::new(AtomicU32::new(0)),
+                capture_bitrate: Arc::new(AtomicU32::new(4_000_000)),
                 capture_display: Arc::new(AtomicU32::new(0)),
                 frame_tx,
                 ws_handle: Mutex::new(None),
