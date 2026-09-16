@@ -69,9 +69,9 @@ mod platform {
         fn CGEventCreateKeyboardEvent(
             src: *mut c_void, vk: u16, down: bool,
         ) -> *mut c_void;
-        // Not variadic in our call — we always pass wheelCount=1 so only wheel1 is read.
-        fn CGEventCreateScrollWheelEvent(
-            src: *mut c_void, unit: u32, wc: u32, w1: i32,
+            // CGEventCreateScrollWheelEvent2: fixed-arity version supporting up to 3 axes
+        fn CGEventCreateScrollWheelEvent2(
+            src: *mut c_void, unit: u32, wc: u32, w1: i32, w2: i32, w3: i32,
         ) -> *mut c_void;
         fn CGEventPost(tap: u32, ev: *mut c_void);
         fn CGEventSetFlags(ev: *mut c_void, flags: u64);
@@ -104,9 +104,10 @@ mod platform {
     }
 
     #[inline]
-    unsafe fn post_scroll(dy: i32) {
-        let ev = CGEventCreateScrollWheelEvent(
-            std::ptr::null_mut(), SCROLL_PIXEL, 1, dy,
+    unsafe fn post_scroll(dy: i32, dx: i32) {
+        let axes = if dx != 0 { 2 } else { 1 };
+        let ev = CGEventCreateScrollWheelEvent2(
+            std::ptr::null_mut(), SCROLL_PIXEL, axes, dy, dx, 0,
         );
         if !ev.is_null() { CGEventPost(HID, ev); CFRelease(ev); }
     }
@@ -228,8 +229,10 @@ mod platform {
 
                 "wheel" => {
                     let dy = ev["deltaY"].as_f64().unwrap_or(0.0);
-                    let ticks = ((-dy) / 20.0) as i32;
-                    if ticks != 0 { post_scroll(ticks); }
+                    let dx = ev["deltaX"].as_f64().unwrap_or(0.0);
+                    let ticks_y = ((-dy) / 20.0) as i32;
+                    let ticks_x = ((-dx) / 20.0) as i32;
+                    if ticks_y != 0 || ticks_x != 0 { post_scroll(ticks_y, ticks_x); }
                 }
 
                 "keydown" | "keyup" => {
@@ -319,6 +322,7 @@ mod platform {
     const MIDDLEDOWN: u32 = 0x0020;
     const MIDDLEUP:   u32 = 0x0040;
     const WHEEL:      u32 = 0x0800;
+    const HWHEEL:     u32 = 0x1000;
     const KEYUP:      u32 = 0x0002;
 
     #[link(name = "user32")]
@@ -406,11 +410,11 @@ mod platform {
 
                 "wheel" => {
                     let dy = ev["deltaY"].as_f64().unwrap_or(0.0);
-                    // deltaY already normalized to ~20px per line by frontend accumulator
-                    let delta = ((-dy) * 6.0) as i32;
-                    if delta != 0 {
-                        mouse_event(WHEEL, 0, 0, delta as u32, 0);
-                    }
+                    let dx = ev["deltaX"].as_f64().unwrap_or(0.0);
+                    let v_delta = ((-dy) * 6.0) as i32;
+                    let h_delta = (dx * 6.0) as i32;
+                    if v_delta != 0 { mouse_event(WHEEL,  0, 0, v_delta as u32, 0); }
+                    if h_delta != 0 { mouse_event(HWHEEL, 0, 0, h_delta as u32, 0); }
                 }
 
                 "keydown" => {

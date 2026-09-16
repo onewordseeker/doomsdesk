@@ -18,7 +18,8 @@ export default function RemoteDisplay({ framesChannel, dataChannel, remoteScreen
   const dcRef = useRef(dataChannel)
   const lastMoveSentRef = useRef(0)
   const heldModsRef = useRef({ ctrl: false, shift: false, alt: false, meta: false })
-  const wheelAccRef = useRef(0) // accumulated scroll delta for trackpad sub-tick events
+  const wheelAccRef = useRef(0)  // accumulated vertical scroll for trackpad sub-tick events
+  const wheelAccXRef = useRef(0) // accumulated horizontal scroll
   const pointerLockedRef = useRef(false)
   const [frozen, setFrozen] = useState(false)
   const [hasFrames, setHasFrames] = useState(false)
@@ -301,15 +302,22 @@ export default function RemoteDisplay({ framesChannel, dataChannel, remoteScreen
   const onWheel = useCallback((e: React.WheelEvent) => {
     e.preventDefault()
     let dy = e.deltaY
-    // Pixel mode (trackpad): accumulate until we have at least one line-equivalent
+    let dx = e.deltaX
     if (e.deltaMode === 0) {
+      // Pixel mode (trackpad): accumulate until we have at least one line-equivalent (20px)
       wheelAccRef.current += dy
       const lines = Math.trunc(wheelAccRef.current / 20)
-      if (lines === 0) return
       wheelAccRef.current -= lines * 20
       dy = lines * 20
+
+      wheelAccXRef.current += dx
+      const xlines = Math.trunc(wheelAccXRef.current / 20)
+      wheelAccXRef.current -= xlines * 20
+      dx = xlines * 20
+
+      if (lines === 0 && xlines === 0) return
     }
-    sendInput({ type: 'wheel', deltaX: e.deltaX, deltaY: dy })
+    sendInput({ type: 'wheel', deltaX: dx, deltaY: dy })
   }, [dataChannel])
 
   const onDblClick = useCallback((e: React.MouseEvent) => {

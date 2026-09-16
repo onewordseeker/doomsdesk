@@ -198,6 +198,14 @@ async fn handle_message(
                 create_agent_window(app, &controller_id);
             }
         }
+        "incoming" => {
+            // Pop the main window so the user sees the approval dialog even if app is in tray
+            if let Some(main) = app.get_webview_window("main") {
+                let _ = main.show();
+                let _ = main.set_focus();
+                let _ = main.request_user_attention(Some(tauri::UserAttentionType::Critical));
+            }
+        }
         "peer_disconnected" => {
             close_agent_window(app);
             let _ = app.emit("session-ended", ());

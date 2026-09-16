@@ -227,13 +227,26 @@ export default function Home() {
                 {randomPw || '------'}
               </div>
               <p className="text-xs text-slate-500 mb-2">Valid for this session only</p>
-              <button
-                onClick={() => copy(randomPw, 'pw')}
-                className="flex items-center gap-1.5 text-xs text-slate-400 hover:text-brand transition-colors"
-              >
-                <Copy size={11} />
-                {copyFeedback === 'pw' ? 'Copied!' : 'Copy'}
-              </button>
+              <div className="flex items-center gap-3">
+                <button
+                  onClick={() => copy(randomPw, 'pw')}
+                  className="flex items-center gap-1.5 text-xs text-slate-400 hover:text-brand transition-colors"
+                >
+                  <Copy size={11} />
+                  {copyFeedback === 'pw' ? 'Copied!' : 'Copy'}
+                </button>
+                <button
+                  onClick={async () => {
+                    const pw = await invoke<string>('refresh_random_password')
+                    setRandomPw(pw)
+                  }}
+                  className="flex items-center gap-1.5 text-xs text-slate-400 hover:text-brand transition-colors"
+                  title="Generate new session password"
+                >
+                  <RefreshCw size={11} />
+                  Refresh
+                </button>
+              </div>
             </div>
           </div>
 
@@ -451,18 +464,26 @@ function SettingsOverlay({ onClose }: { onClose: () => void }) {
   const [serverUrl, setServerUrl] = useState('')
   const [webUrl, setWebUrl] = useState('')
   const [startMinimized, setStartMinimized] = useState(false)
+  const [launchOnStartup, setLaunchOnStartup] = useState(false)
 
   useEffect(() => {
-    invoke<Record<string, unknown>>('get_config').then((c) => {
+    Promise.all([
+      invoke<Record<string, unknown>>('get_config'),
+      invoke<boolean>('get_launch_on_startup'),
+    ]).then(([c, autostart]) => {
       setConfigState(c)
       setServerUrl(c.serverUrl as string)
       setWebUrl((c.webUrl as string) ?? 'https://doomsdesk.hamidentifier.cloud')
       setStartMinimized(!!(c.startMinimized))
+      setLaunchOnStartup(autostart)
     })
   }, [])
 
   async function save() {
-    await invoke('set_config', { partial: { serverUrl, webUrl, startMinimized } })
+    await Promise.all([
+      invoke('set_config', { partial: { serverUrl, webUrl, startMinimized } }),
+      invoke('set_launch_on_startup', { enabled: launchOnStartup }),
+    ])
     onClose()
   }
 
@@ -507,6 +528,21 @@ function SettingsOverlay({ onClose }: { onClose: () => void }) {
               )}
             </div>
             <span className="text-xs text-slate-400 select-none">Start minimized to tray</span>
+          </label>
+          <label className="flex items-center gap-3 cursor-pointer">
+            <div
+              onClick={() => setLaunchOnStartup((v) => !v)}
+              className={`w-4 h-4 rounded border flex items-center justify-center transition-colors shrink-0 ${
+                launchOnStartup ? 'bg-brand border-brand' : 'border-surface-border bg-bg'
+              }`}
+            >
+              {launchOnStartup && (
+                <svg className="w-2.5 h-2.5 text-white" fill="none" viewBox="0 0 10 10">
+                  <path d="M1.5 5l2.5 2.5 4.5-4.5" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+                </svg>
+              )}
+            </div>
+            <span className="text-xs text-slate-400 select-none">Launch on system startup</span>
           </label>
           <p className="text-xs text-slate-600">
             Device ID:{' '}

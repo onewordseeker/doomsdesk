@@ -230,6 +230,65 @@ async fn save_received_file(app: AppHandle, name: String, data: Vec<u8>) -> Resu
     Ok(())
 }
 
+/// Regenerate the session password and re-register with the signaling server.
+#[tauri::command]
+async fn refresh_random_password(state: State<'_, AppState>) -> Result<String, String> {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.subsec_nanos())
+        .unwrap_or(123456);
+    // LCG mix for better distribution from monotonic nanos
+    let h: u64 = (nanos as u64)
+        .wrapping_mul(6364136223846793005)
+        .wrapping_add(1442695040888963407);
+    let new_pw = ((h >> 17) % 900_000 + 100_000).to_string();
+
+    *state.random_password.lock().await = new_pw.clone();
+
+    let cfg = state.config.lock().unwrap().clone();
+    let perm_pw = state.permanent_password.lock().unwrap().clone();
+    let reg = serde_json::json!({
+        "type": "register",
+        "deviceId": cfg.device_id,
+        "permanentPassword": if perm_pw.is_empty() { Value::Null } else { Value::String(perm_pw) },
+        "randomPassword": new_pw,
+    });
+    let lock = state.signal_tx.lock().await;
+    if let Some(tx) = lock.as_ref() {
+        tx.send(reg).await.ok();
+    }
+    Ok(new_pw)
+}
+
+/// Enable or disable launch-on-startup (OS autostart).
+#[tauri::command]
+fn set_launch_on_startup(state: State<'_, AppState>, enabled: bool) -> Result<(), String> {
+    let binary = std::env::current_exe()
+        .map(|p| p.to_string_lossy().to_string())
+        .map_err(|e| e.to_string())?;
+    let al = auto_launch::AutoLaunch::new("DoomsDesk", &binary, false, &[] as &[&str]);
+    if enabled {
+        al.enable().map_err(|e| e.to_string())?;
+    } else if al.is_enabled().unwrap_or(false) {
+        al.disable().map_err(|e| e.to_string())?;
+    }
+    let mut cfg = state.config.lock().unwrap();
+    cfg.launch_on_startup = enabled;
+    config::save(&state.config_path.lock().unwrap(), &cfg);
+    Ok(())
+}
+
+/// Query whether launch-on-startup is currently enabled via the OS.
+#[tauri::command]
+fn get_launch_on_startup() -> bool {
+    let binary = std::env::current_exe()
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or_default();
+    auto_launch::AutoLaunch::new("DoomsDesk", &binary, false, &[] as &[&str])
+        .is_enabled()
+        .unwrap_or(false)
+}
+
 /// Returns the list of connected displays.
 #[tauri::command]
 fn list_monitors() -> Vec<Value> {
@@ -563,6 +622,9 @@ fn main() {
             set_capture_monitor,
             save_received_file,
             capture_screenshot_png,
+            refresh_random_password,
+            set_launch_on_startup,
+            get_launch_on_startup,
         ])
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
