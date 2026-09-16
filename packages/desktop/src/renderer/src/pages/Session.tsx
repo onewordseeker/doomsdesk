@@ -5,7 +5,8 @@ import { getCurrentWindow } from '@tauri-apps/api/window'
 import RemoteDisplay from '../components/RemoteDisplay'
 import {
   Maximize2, Minimize2, ZoomIn, ZoomOut, Expand, Shrink,
-  Clipboard, X, Monitor, MessageSquare, Send, Tv2
+  Clipboard, X, Monitor, MessageSquare, Send, Tv2,
+  Upload, Download, Mic, MicOff
 } from 'lucide-react'
 
 interface Props {
@@ -19,6 +20,16 @@ interface MonitorInfo {
   width: number
   height: number
   isMain: boolean
+}
+
+interface FileTransfer {
+  id: string
+  name: string
+  size: number
+  received: number
+  direction: 'sending' | 'receiving'
+  chunks: ArrayBuffer[]
+  done: boolean
 }
 
 const ICE_SERVERS: RTCIceServer[] = [
@@ -44,6 +55,8 @@ const DISPLAY_PRESETS = [
 type DisplayPreset = typeof DISPLAY_PRESETS[number]
 type ConnState = 'connecting' | 'connected' | 'failed' | 'disconnected'
 
+const FILE_CHUNK_SIZE = 65536  // 64 KB chunks
+
 export default function Session({ peerId, role, onEnd }: Props) {
   const [framesChannel, setFramesChannel] = useState<RTCDataChannel | null>(null)
   const [dataChannel, setDataChannel] = useState<RTCDataChannel | null>(null)
@@ -62,18 +75,29 @@ export default function Session({ peerId, role, onEnd }: Props) {
   const [chatOpen, setChatOpen] = useState(false)
   const [chatMessages, setChatMessages] = useState<Array<{ from: 'me' | 'them'; text: string; ts: number }>>([])
   const [chatInput, setChatInput] = useState('')
-  // Agent-side monitor list (populated once DC opens)
   const [agentMonitors, setAgentMonitors] = useState<MonitorInfo[]>([])
-  const [selectedMonitor, setSelectedMonitor] = useState<number>(0) // 0 = primary
+  const [selectedMonitor, setSelectedMonitor] = useState<number>(0)
+  const [fileTransfers, setFileTransfers] = useState<FileTransfer[]>([])
+  const [showFiles, setShowFiles] = useState(false)
+  const [micActive, setMicActive] = useState(false)
+  const [remoteAudioEl] = useState(() => {
+    const el = document.createElement('audio')
+    el.autoplay = true
+    return el
+  })
 
   const pcRef = useRef<RTCPeerConnection | null>(null)
   const dcRef = useRef<RTCDataChannel | null>(null)
+  const fileDcRef = useRef<RTCDataChannel | null>(null)
   const frameWsRef = useRef<WebSocket | null>(null)
   const agentCleanupRef = useRef<(() => void) | null>(null)
   const origScreenRef = useRef<{ width: number; height: number } | null>(null)
   const durationRef = useRef<ReturnType<typeof setInterval>>()
   const screenCheckRef = useRef<ReturnType<typeof setInterval>>()
   const hideTimerRef = useRef<ReturnType<typeof setTimeout>>()
+  const pendingTransfersRef = useRef<Map<string, FileTransfer>>(new Map())
+  const micStreamRef = useRef<MediaStream | null>(null)
+  const micSenderRef = useRef<RTCRtpSender | null>(null)
 
   function diag(msg: string) {
     const ts = new Date().toISOString().slice(11, 23)
@@ -124,6 +148,14 @@ export default function Session({ peerId, role, onEnd }: Props) {
     const pc = new RTCPeerConnection({ iceServers: ICE_SERVERS })
     pcRef.current = pc
 
+    // Receive remote audio track (agent's mic)
+    pc.ontrack = (e) => {
+      if (e.track.kind === 'audio') {
+        diag('remote audio track received')
+        remoteAudioEl.srcObject = e.streams[0]
+      }
+    }
+
     pc.onicecandidate = ({ candidate }) => {
       if (candidate) {
         const t = candidate.type ?? 'unknown'
@@ -158,8 +190,10 @@ export default function Session({ peerId, role, onEnd }: Props) {
 
     const framesDc = pc.createDataChannel('frames', { ordered: false, maxRetransmits: 0 })
     const inputDc = pc.createDataChannel('input')
+    const fileDc = pc.createDataChannel('files')
     setDataChannel(inputDc)
     dcRef.current = inputDc
+    fileDcRef.current = fileDc
 
     const agentCleanups: Array<() => void> = []
 
@@ -170,7 +204,6 @@ export default function Session({ peerId, role, onEnd }: Props) {
     let consecutiveErrors = 0
     let captureRestarting = false
 
-    // Connect to the local binary WS that the Rust capture loop writes to
     async function connectFrameWs() {
       const port = await invoke<number>('start_native_capture')
       const ws = new WebSocket(`ws://127.0.0.1:${port}`)
@@ -178,11 +211,10 @@ export default function Session({ peerId, role, onEnd }: Props) {
 
       ws.onmessage = (ev) => {
         if (!(ev.data instanceof ArrayBuffer)) return
-        if (ev.data.byteLength === 0) return   // stop signal
+        if (ev.data.byteLength === 0) return
         consecutiveErrors = 0
         if (framesDc.readyState !== 'open') return
         if (framesDc.bufferedAmount > 262144) { framesSkipped++; return }
-        // Send raw binary directly — no base64 decode overhead
         framesDc.send(ev.data)
         framesSent++
       }
@@ -196,19 +228,58 @@ export default function Session({ peerId, role, onEnd }: Props) {
     function doRestartCapture(reason: string) {
       if (captureRestarting) return
       captureRestarting = true
-      diag(`${reason} — resetting, restarting capture`)
+      diag(`${reason} — restarting capture`)
       currentBps = 4_000_000
       consecutiveErrors = 0
       invoke('set_capture_bitrate', { bps: 4_000_000 }).catch(() => {})
-
       frameWsRef.current?.close()
       frameWsRef.current = null
       invoke('stop_native_capture').catch(() => {})
-
       setTimeout(async () => {
         await connectFrameWs()
         captureRestarting = false
       }, 500)
+    }
+
+    // File DC: agent receives files from controller
+    fileDc.binaryType = 'arraybuffer'
+    fileDc.onopen = () => diag('file DC open')
+    fileDc.onmessage = (ev) => {
+      if (typeof ev.data === 'string') {
+        const msg = JSON.parse(ev.data)
+        if (msg.type === 'file_start') {
+          pendingTransfersRef.current.set(msg.id, {
+            id: msg.id, name: msg.name, size: msg.size,
+            received: 0, direction: 'receiving', chunks: [], done: false,
+          })
+          setFileTransfers((prev) => [...prev, {
+            id: msg.id, name: msg.name, size: msg.size,
+            received: 0, direction: 'receiving', chunks: [], done: false,
+          }])
+          setShowFiles(true)
+          diag(`file receiving: ${msg.name} (${(msg.size / 1024).toFixed(0)} KB)`)
+        } else if (msg.type === 'file_end') {
+          const t = pendingTransfersRef.current.get(msg.id)
+          if (!t) return
+          const blob = new Blob(t.chunks)
+          const data = new Uint8Array(await blob.arrayBuffer())
+          invoke('save_received_file', { name: t.name, data: Array.from(data) }).catch(() => {})
+          t.done = true
+          pendingTransfersRef.current.delete(msg.id)
+          setFileTransfers((prev) => prev.map((f) => f.id === msg.id ? { ...f, done: true } : f))
+          diag(`file received: ${t.name}`)
+        }
+      } else if (ev.data instanceof ArrayBuffer) {
+        // Chunk: first 36 bytes are the transfer ID (UUID as ASCII), rest is data
+        const idBuf = ev.data.slice(0, 36)
+        const chunk = ev.data.slice(36)
+        const id = new TextDecoder().decode(idBuf)
+        const t = pendingTransfersRef.current.get(id)
+        if (!t) return
+        t.chunks.push(chunk)
+        t.received += chunk.byteLength
+        setFileTransfers((prev) => prev.map((f) => f.id === id ? { ...f, received: t.received } : f))
+      }
     }
 
     inputDc.onmessage = (ev) => {
@@ -245,7 +316,6 @@ export default function Session({ peerId, role, onEnd }: Props) {
       inputDc.send(
         JSON.stringify({ type: 'screen_info', width: window.screen.width, height: window.screen.height })
       )
-      // Send monitor list to controller
       try {
         const monitors = await invoke<MonitorInfo[]>('list_monitors')
         inputDc.send(JSON.stringify({ type: 'monitor_list', monitors }))
@@ -258,7 +328,7 @@ export default function Session({ peerId, role, onEnd }: Props) {
     setRemoteScreenSize({ width: window.screen.width, height: window.screen.height })
     origScreenRef.current = { width: window.screen.width, height: window.screen.height }
 
-    // Adaptive bitrate every 3s — floor 2 Mbps, ceiling 8 Mbps
+    // Adaptive bitrate — 2 Mbps floor, 8 Mbps ceiling
     const bitrateInterval = setInterval(() => {
       const total = framesSent + framesSkipped
       if (total === 0) return
@@ -288,7 +358,6 @@ export default function Session({ peerId, role, onEnd }: Props) {
     }, 3000)
     agentCleanups.push(() => clearInterval(bitrateInterval))
 
-    // Tauri error events (capture failures) — still use Tauri event since they're rare
     const errUnsub = await listen<string>('screen-frame-error', () => {
       framesSkipped++
       consecutiveErrors++
@@ -359,6 +428,48 @@ export default function Session({ peerId, role, onEnd }: Props) {
             }
           } catch {}
         }
+      } else if (dc.label === 'files') {
+        dc.binaryType = 'arraybuffer'
+        fileDcRef.current = dc
+        dc.onopen = () => diag('file DC open')
+        dc.onmessage = (ev) => {
+          // Controller receives files from agent (future: reverse direction)
+          if (typeof ev.data === 'string') {
+            try {
+              const msg = JSON.parse(ev.data)
+              if (msg.type === 'file_start') {
+                pendingTransfersRef.current.set(msg.id, {
+                  id: msg.id, name: msg.name, size: msg.size,
+                  received: 0, direction: 'receiving', chunks: [], done: false,
+                })
+                setFileTransfers((prev) => [...prev, {
+                  id: msg.id, name: msg.name, size: msg.size,
+                  received: 0, direction: 'receiving', chunks: [], done: false,
+                }])
+                setShowFiles(true)
+              } else if (msg.type === 'file_end') {
+                const t = pendingTransfersRef.current.get(msg.id)
+                if (!t) return
+                const blob = new Blob(t.chunks)
+                blob.arrayBuffer().then((ab) => {
+                  const data = Array.from(new Uint8Array(ab))
+                  invoke('save_received_file', { name: t.name, data }).catch(() => {})
+                })
+                t.done = true
+                pendingTransfersRef.current.delete(msg.id)
+                setFileTransfers((prev) => prev.map((f) => f.id === msg.id ? { ...f, done: true } : f))
+              }
+            } catch {}
+          } else if (ev.data instanceof ArrayBuffer) {
+            const id = new TextDecoder().decode(ev.data.slice(0, 36))
+            const chunk = ev.data.slice(36)
+            const t = pendingTransfersRef.current.get(id)
+            if (!t) return
+            t.chunks.push(chunk)
+            t.received += chunk.byteLength
+            setFileTransfers((prev) => prev.map((f) => f.id === id ? { ...f, received: t.received } : f))
+          }
+        }
       }
     }
   }
@@ -400,6 +511,80 @@ export default function Session({ peerId, role, onEnd }: Props) {
     }
   }
 
+  // Send a file to the remote (controller → agent)
+  async function sendFile(file: File) {
+    const dc = fileDcRef.current
+    if (!dc || dc.readyState !== 'open') return
+    const id = crypto.randomUUID()
+    const name = file.name
+    const size = file.size
+
+    diag(`sending file: ${name} (${(size / 1024).toFixed(0)} KB)`)
+    setFileTransfers((prev) => [...prev, { id, name, size, received: 0, direction: 'sending', chunks: [], done: false }])
+    setShowFiles(true)
+
+    dc.send(JSON.stringify({ type: 'file_start', id, name, size }))
+
+    const buf = await file.arrayBuffer()
+    let offset = 0
+    const idBytes = new TextEncoder().encode(id.padEnd(36, ' ').slice(0, 36))
+
+    while (offset < size) {
+      const slice = buf.slice(offset, offset + FILE_CHUNK_SIZE)
+      const packet = new Uint8Array(36 + slice.byteLength)
+      packet.set(idBytes, 0)
+      packet.set(new Uint8Array(slice), 36)
+
+      // Respect back-pressure
+      while (dc.bufferedAmount > 1_048_576) {
+        await new Promise((r) => setTimeout(r, 50))
+      }
+
+      dc.send(packet.buffer)
+      offset += slice.byteLength
+
+      const sent = offset
+      setFileTransfers((prev) => prev.map((f) => f.id === id ? { ...f, received: sent } : f))
+    }
+
+    dc.send(JSON.stringify({ type: 'file_end', id }))
+    setFileTransfers((prev) => prev.map((f) => f.id === id ? { ...f, done: true } : f))
+    diag(`file sent: ${name}`)
+  }
+
+  async function toggleMic() {
+    const pc = pcRef.current
+    if (!pc) return
+
+    if (micActive) {
+      // Mute / remove mic
+      micSenderRef.current?.track?.stop()
+      if (micSenderRef.current) {
+        try { pc.removeTrack(micSenderRef.current) } catch {}
+      }
+      micStreamRef.current?.getTracks().forEach((t) => t.stop())
+      micStreamRef.current = null
+      micSenderRef.current = null
+      setMicActive(false)
+      diag('mic off')
+    } else {
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false })
+        micStreamRef.current = stream
+        const track = stream.getAudioTracks()[0]
+        micSenderRef.current = pc.addTrack(track, stream)
+        setMicActive(true)
+        diag('mic on')
+        // Renegotiate so the remote receives the audio track
+        const offer = await pc.createOffer()
+        await pc.setLocalDescription(offer)
+        invoke('send_signaling', { msg: { type: 'offer', targetId: peerId, sdp: offer.sdp } })
+      } catch (e) {
+        diag(`mic error: ${e}`)
+      }
+    }
+  }
+
   function cleanup() {
     clearInterval(durationRef.current)
     clearInterval(screenCheckRef.current)
@@ -409,6 +594,7 @@ export default function Session({ peerId, role, onEnd }: Props) {
       agentCleanupRef.current?.()
       agentCleanupRef.current = null
     }
+    micStreamRef.current?.getTracks().forEach((t) => t.stop())
     pcRef.current?.close()
     pcRef.current = null
     setFramesChannel(null)
@@ -458,9 +644,7 @@ export default function Session({ peerId, role, onEnd }: Props) {
   const toggleFullscreen = useCallback(async () => {
     const newFs = !fullscreen
     setFullscreen(newFs)
-    try {
-      await getCurrentWindow().setFullscreen(newFs)
-    } catch {}
+    try { await getCurrentWindow().setFullscreen(newFs) } catch {}
     if (newFs) {
       hideTimerRef.current = setTimeout(() => setToolbarHidden(true), 3000)
     } else {
@@ -477,9 +661,17 @@ export default function Session({ peerId, role, onEnd }: Props) {
     }
   }
 
-  if (role === 'agent') {
-    return null
+  function pickAndSendFile() {
+    const input = document.createElement('input')
+    input.type = 'file'
+    input.onchange = async () => {
+      const file = input.files?.[0]
+      if (file) await sendFile(file)
+    }
+    input.click()
   }
+
+  if (role === 'agent') return null
 
   return (
     <div
@@ -536,19 +728,17 @@ export default function Session({ peerId, role, onEnd }: Props) {
 
           <div className="w-px h-4 bg-surface-border mx-1" />
 
-          {/* Monitor selector — shown when agent has multiple displays */}
           {agentMonitors.length > 1 && (
             <>
-              <span title="Switch remote monitor">
-                <Tv2 size={14} className="text-slate-500" />
+              <span title="Remote monitors" className="text-slate-500">
+                <Tv2 size={14} />
               </span>
               <select
                 value={selectedMonitor}
                 onChange={(e) => switchMonitor(Number(e.target.value))}
-                title="Switch remote monitor"
                 className="text-xs bg-surface text-slate-300 border border-surface-border rounded px-1.5 py-0.5 cursor-pointer"
               >
-                {agentMonitors.map((m, i) => (
+                {agentMonitors.map((m) => (
                   <option key={m.id} value={m.id}>
                     {m.isMain ? '★ ' : ''}{m.width}×{m.height}
                   </option>
@@ -558,10 +748,7 @@ export default function Session({ peerId, role, onEnd }: Props) {
             </>
           )}
 
-          <span
-            className="text-xs text-slate-600 font-mono"
-            title="Current remote display resolution"
-          >
+          <span className="text-xs text-slate-600 font-mono" title="Remote display resolution">
             {remoteScreenSize.width}×{remoteScreenSize.height}
           </span>
           <select
@@ -574,9 +761,7 @@ export default function Session({ peerId, role, onEnd }: Props) {
             className="text-xs bg-surface text-slate-300 border border-surface-border rounded px-1.5 py-0.5 cursor-pointer ml-1"
           >
             {DISPLAY_PRESETS.map((p) => (
-              <option key={p.label} value={p.label}>
-                {p.label}
-              </option>
+              <option key={p.label} value={p.label}>{p.label}</option>
             ))}
           </select>
 
@@ -586,9 +771,7 @@ export default function Session({ peerId, role, onEnd }: Props) {
             onClick={() =>
               navigator.clipboard.readText().then((text) => {
                 const dc = dcRef.current
-                if (dc?.readyState === 'open') {
-                  dc.send(JSON.stringify({ type: 'clipboard', text }))
-                }
+                if (dc?.readyState === 'open') dc.send(JSON.stringify({ type: 'clipboard', text }))
               })
             }
             title="Push local clipboard → remote"
@@ -598,39 +781,40 @@ export default function Session({ peerId, role, onEnd }: Props) {
           <ToolBtn
             onClick={() => {
               const dc = dcRef.current
-              if (dc?.readyState === 'open') {
-                dc.send(JSON.stringify({ type: 'request_clipboard' }))
-              }
+              if (dc?.readyState === 'open') dc.send(JSON.stringify({ type: 'request_clipboard' }))
             }}
             title="Pull remote clipboard → local"
           >
             <Clipboard size={14} style={{ transform: 'scaleX(-1)' }} />
           </ToolBtn>
 
-          <ToolBtn
-            onClick={() => setChatOpen((v) => !v)}
-            title="Chat"
-            active={chatOpen}
-          >
+          <ToolBtn onClick={pickAndSendFile} title="Send file to remote">
+            <Upload size={14} />
+          </ToolBtn>
+
+          {fileTransfers.length > 0 && (
+            <ToolBtn onClick={() => setShowFiles((v) => !v)} title="File transfers" active={showFiles}>
+              <Download size={14} />
+            </ToolBtn>
+          )}
+
+          <ToolBtn onClick={toggleMic} title={micActive ? 'Mute mic' : 'Enable mic'} active={micActive}>
+            {micActive ? <Mic size={14} /> : <MicOff size={14} />}
+          </ToolBtn>
+
+          <ToolBtn onClick={() => setChatOpen((v) => !v)} title="Chat" active={chatOpen}>
             <MessageSquare size={14} />
           </ToolBtn>
 
           <div className="w-px h-4 bg-surface-border mx-1" />
 
-          <ToolBtn
-            onClick={toggleFullscreen}
-            title={fullscreen ? 'Exit fullscreen' : 'Fullscreen'}
-          >
+          <ToolBtn onClick={toggleFullscreen} title={fullscreen ? 'Exit fullscreen' : 'Fullscreen'}>
             {fullscreen ? <Minimize2 size={14} /> : <Maximize2 size={14} />}
           </ToolBtn>
 
           <div className="w-px h-4 bg-surface-border mx-1" />
 
-          <ToolBtn
-            onClick={() => setShowDiag((v) => !v)}
-            title="Toggle diagnostics"
-            active={showDiag}
-          >
+          <ToolBtn onClick={() => setShowDiag((v) => !v)} title="Toggle diagnostics" active={showDiag}>
             <Monitor size={14} />
           </ToolBtn>
 
@@ -655,6 +839,36 @@ export default function Session({ peerId, role, onEnd }: Props) {
             <p className="text-slate-400 text-xs font-mono">
               {initError || 'ICE negotiation failed — the devices could not reach each other'}
             </p>
+          </div>
+        </div>
+      )}
+
+      {/* File transfers panel */}
+      {showFiles && fileTransfers.length > 0 && (
+        <div className="absolute top-12 right-0 z-20 w-72 bg-black/90 border border-slate-700 rounded-bl-lg">
+          <div className="flex items-center justify-between px-3 py-1.5 border-b border-slate-700">
+            <span className="text-xs text-slate-400 font-mono">File Transfers</span>
+            <button onClick={() => setShowFiles(false)} className="text-slate-500 hover:text-white">
+              <X size={12} />
+            </button>
+          </div>
+          <div className="p-2 space-y-2 max-h-48 overflow-y-auto">
+            {fileTransfers.map((ft) => (
+              <div key={ft.id} className="text-xs">
+                <div className="flex justify-between text-slate-400 mb-0.5">
+                  <span className="truncate max-w-[160px]">{ft.name}</span>
+                  <span className="text-slate-500 ml-2">
+                    {ft.done ? '✓' : `${Math.round((ft.received / ft.size) * 100)}%`}
+                  </span>
+                </div>
+                <div className="w-full bg-surface rounded-full h-1">
+                  <div
+                    className={`h-1 rounded-full transition-all ${ft.done ? 'bg-emerald-500' : 'bg-brand'}`}
+                    style={{ width: `${Math.min(100, (ft.received / ft.size) * 100)}%` }}
+                  />
+                </div>
+              </div>
+            ))}
           </div>
         </div>
       )}
@@ -724,10 +938,7 @@ export default function Session({ peerId, role, onEnd }: Props) {
               onChange={(e) => setChatInput(e.target.value)}
               onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); sendChat(chatInput) } }}
             />
-            <button
-              onClick={() => sendChat(chatInput)}
-              className="p-1.5 text-slate-400 hover:text-brand"
-            >
+            <button onClick={() => sendChat(chatInput)} className="p-1.5 text-slate-400 hover:text-brand">
               <Send size={12} />
             </button>
           </div>

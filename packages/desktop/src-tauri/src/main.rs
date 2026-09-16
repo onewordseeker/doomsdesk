@@ -181,6 +181,18 @@ fn forward_agent_log(app: AppHandle, msg: String) {
     let _ = app.emit("agent-log", msg);
 }
 
+/// Save a file received from the remote side — shows native save dialog.
+#[tauri::command]
+async fn save_received_file(app: AppHandle, name: String, data: Vec<u8>) -> Result<(), String> {
+    use tauri_plugin_dialog::DialogExt;
+    let path = app.dialog().file().set_file_name(&name).blocking_save_file();
+    if let Some(p) = path {
+        let buf = p.into_path().map_err(|e| e.to_string())?;
+        std::fs::write(&buf, &data).map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
 /// Returns the list of connected displays.
 #[tauri::command]
 fn list_monitors() -> Vec<Value> {
@@ -470,6 +482,7 @@ fn main() {
             set_capture_bitrate,
             list_monitors,
             set_capture_monitor,
+            save_received_file,
         ])
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
