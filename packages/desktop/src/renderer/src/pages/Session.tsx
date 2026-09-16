@@ -71,7 +71,7 @@ export default function Session({ peerId, role, onEnd }: Props) {
   const [sessionDuration, setSessionDuration] = useState(0)
   const [diagLines, setDiagLines] = useState<string[]>([])
   const [showDiag, setShowDiag] = useState(true)
-  const [renderStats, setRenderStats] = useState<{ fps: number; decodeMs: number } | null>(null)
+  const [renderStats, setRenderStats] = useState<{ fps: number; decodeMs: number; bps?: number } | null>(null)
   const [chatOpen, setChatOpen] = useState(false)
   const [chatMessages, setChatMessages] = useState<Array<{ from: 'me' | 'them'; text: string; ts: number }>>([])
   const [chatInput, setChatInput] = useState('')
@@ -401,6 +401,11 @@ export default function Session({ peerId, role, onEnd }: Props) {
       } else {
         stableWindows = 0
       }
+      // Inform controller of current bitrate
+      const d = dcRef.current
+      if (d?.readyState === 'open') {
+        d.send(JSON.stringify({ type: 'bitrate_info', bps: currentBps }))
+      }
       framesSent = 0
       framesSkipped = 0
     }, 3000)
@@ -477,7 +482,9 @@ export default function Session({ peerId, role, onEnd }: Props) {
               navigator.clipboard.writeText(msg.text ?? '').catch(() => {})
               diag(`remote clipboard pulled (${(msg.text ?? '').length} chars)`)
             } else if (msg.type === 'stats') {
-              setRenderStats({ fps: msg.fps, decodeMs: msg.decodeMs })
+              setRenderStats((prev) => ({ ...prev, fps: msg.fps, decodeMs: msg.decodeMs }))
+            } else if (msg.type === 'bitrate_info') {
+              setRenderStats((prev) => prev ? { ...prev, bps: msg.bps } : { fps: 0, decodeMs: 0, bps: msg.bps })
             } else if (msg.type === 'pong') {
               if (msg.t) setPeerRtt(Date.now() - msg.t)
             } else if (msg.type === 'chat') {
@@ -815,8 +822,9 @@ export default function Session({ peerId, role, onEnd }: Props) {
           <span className="text-xs text-slate-500 font-mono">{formatDuration(sessionDuration)}</span>
           {renderStats && (
             <span className="text-xs font-mono text-slate-500 tabular-nums">
-              {renderStats.fps.toFixed(0)} fps · {renderStats.decodeMs} ms
-              {peerRtt !== null && ` · ${peerRtt}ms rtt`}
+              {renderStats.fps?.toFixed(0) ?? 0} fps · {renderStats.decodeMs ?? 0} ms
+              {renderStats.bps != null && ` · ${(renderStats.bps / 1_000_000).toFixed(1)}M`}
+              {peerRtt !== null && ` · ${peerRtt}ms`}
             </span>
           )}
           <span className="text-xs px-1.5 py-0.5 rounded bg-surface text-slate-400">Controller</span>
