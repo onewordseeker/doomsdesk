@@ -218,16 +218,30 @@ pub fn create_agent_window(app: &AppHandle, peer_id: &str) {
         "agent-banner",
         tauri::WebviewUrl::App(url.into()),
     )
-    .title("DoomsDesk")
-    .inner_size(1.0, 1.0)
+    .title("DoomsDesk — Remote Session")
+    .inner_size(320.0, 72.0)
     .decorations(false)
-    .skip_taskbar(true)
+    .skip_taskbar(false)
     .resizable(false)
-    .visible(false)
+    .always_on_top(true)
+    .visible(true)
     .focused(false)
     .build()
     {
-        Ok(_) => {}
+        Ok(win) => {
+            // Position at top-right of primary monitor
+            if let (Ok(sf), Ok(mon)) = (win.scale_factor(), win.current_monitor()) {
+                if let Some(m) = mon {
+                    let pos = m.position();
+                    let size = m.size();
+                    let w = (320.0 * sf) as i32;
+                    let margin = (16.0 * sf) as i32;
+                    let x = pos.x + size.width as i32 - w - margin;
+                    let y = pos.y + margin;
+                    let _ = win.set_position(tauri::PhysicalPosition::new(x, y));
+                }
+            }
+        }
         Err(e) => eprintln!("[signaling] agent window error: {}", e),
     }
 }
