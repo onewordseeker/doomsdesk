@@ -10,9 +10,10 @@ interface Props {
   recording?: boolean
   onRecordingChunk?: (blob: Blob) => void
   pointerLockEnabled?: boolean
+  keyPassthrough?: boolean
 }
 
-export default function RemoteDisplay({ framesChannel, dataChannel, remoteScreenSize, zoom, stretch, connState, recording, onRecordingChunk, pointerLockEnabled = false }: Props) {
+export default function RemoteDisplay({ framesChannel, dataChannel, remoteScreenSize, zoom, stretch, connState, recording, onRecordingChunk, pointerLockEnabled = false, keyPassthrough = true }: Props) {
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const containerRef = useRef<HTMLDivElement>(null)
   const dcRef = useRef(dataChannel)
@@ -334,6 +335,7 @@ export default function RemoteDisplay({ framesChannel, dataChannel, remoteScreen
   }, [dataChannel, remoteScreenSize, stretch])
 
   const onKeyDown = useCallback((e: React.KeyboardEvent) => {
+    if (!keyPassthrough) return
     e.preventDefault()
     if (e.key === 'Control') heldModsRef.current.ctrl = true
     else if (e.key === 'Shift') heldModsRef.current.shift = true
@@ -343,9 +345,10 @@ export default function RemoteDisplay({ framesChannel, dataChannel, remoteScreen
       type: 'keydown', key: e.key, code: e.code,
       modifiers: { ctrl: e.ctrlKey, shift: e.shiftKey, alt: e.altKey, meta: e.metaKey }
     })
-  }, [dataChannel])
+  }, [dataChannel, keyPassthrough])
 
   const onKeyUp = useCallback((e: React.KeyboardEvent) => {
+    if (!keyPassthrough) return
     e.preventDefault()
     if (e.key === 'Control') heldModsRef.current.ctrl = false
     else if (e.key === 'Shift') heldModsRef.current.shift = false
@@ -355,7 +358,7 @@ export default function RemoteDisplay({ framesChannel, dataChannel, remoteScreen
       type: 'keyup', key: e.key, code: e.code,
       modifiers: { ctrl: e.ctrlKey, shift: e.shiftKey, alt: e.altKey, meta: e.metaKey }
     })
-  }, [dataChannel])
+  }, [dataChannel, keyPassthrough])
 
   const onMouseLeave = useCallback((e: React.MouseEvent) => {
     if (e.buttons !== 0) {
@@ -422,6 +425,16 @@ export default function RemoteDisplay({ framesChannel, dataChannel, remoteScreen
           <div className="flex items-center gap-2 bg-black/80 border border-brand/30 rounded-full px-3 py-1">
             <div className="w-1.5 h-1.5 rounded-full bg-brand animate-pulse" />
             <span className="text-xs text-brand font-medium">Pointer captured — Press Escape to release</span>
+          </div>
+        </div>
+      )}
+
+      {/* Key pass-through disabled indicator */}
+      {!keyPassthrough && (
+        <div className="absolute top-2 left-1/2 -translate-x-1/2 z-20 pointer-events-none">
+          <div className="flex items-center gap-2 bg-black/80 border border-amber-500/40 rounded-full px-3 py-1">
+            <div className="w-1.5 h-1.5 rounded-full bg-amber-400" />
+            <span className="text-xs text-amber-400 font-medium">Keys local — Ctrl/⌘ / to re-enable remote keys</span>
           </div>
         </div>
       )}

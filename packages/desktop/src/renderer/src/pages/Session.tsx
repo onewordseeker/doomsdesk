@@ -6,7 +6,7 @@ import RemoteDisplay from '../components/RemoteDisplay'
 import {
   Maximize2, Minimize2, ZoomIn, ZoomOut, Expand, Shrink,
   Clipboard, X, Monitor, MessageSquare, Send, Tv2,
-  Upload, Download, Mic, MicOff, Lock, Activity, Camera, Circle, Gauge, Crosshair, HelpCircle, Moon, Power
+  Upload, Download, Mic, MicOff, Lock, Activity, Camera, Circle, Gauge, Crosshair, HelpCircle, Moon, Power, Keyboard
 } from 'lucide-react'
 
 interface Props {
@@ -97,6 +97,7 @@ export default function Session({ peerId, role, onEnd }: Props) {
   const [qualityPreset, setQualityPreset] = useState<'auto' | 'lan' | 'wan' | 'low'>('auto')
   const [dragOver, setDragOver] = useState(false)
   const [pointerLockEnabled, setPointerLockEnabled] = useState(false)
+  const [keyPassthrough, setKeyPassthrough] = useState(true)
   const [showShortcuts, setShowShortcuts] = useState(false)
   const [toast, setToast] = useState<string | null>(null)
   const [unreadChat, setUnreadChat] = useState(0)
@@ -875,8 +876,7 @@ export default function Session({ peerId, role, onEnd }: Props) {
     return () => window.removeEventListener('paste', onPaste)
   }, [role])
 
-  // F11 toggles fullscreen; Ctrl+= zoom in; Ctrl+- zoom out; Ctrl+0 reset zoom
-  // Click outside closes actions menu
+  // F11 toggles fullscreen; Ctrl+= zoom in; Ctrl+- zoom out; Ctrl+0 reset zoom; Ctrl+/ toggles key pass-through
   useEffect(() => {
     if (role !== 'controller') return
     const onKey = (e: KeyboardEvent) => {
@@ -885,6 +885,8 @@ export default function Session({ peerId, role, onEnd }: Props) {
       else if ((e.ctrlKey || e.metaKey) && e.key === 'm') { e.preventDefault(); toggleMic() }
       else if ((e.ctrlKey || e.metaKey) && e.shiftKey && (e.key === 'r' || e.key === 'R')) {
         e.preventDefault(); setRecording((v) => !v)
+      } else if ((e.ctrlKey || e.metaKey) && e.key === '/') {
+        e.preventDefault(); setKeyPassthrough((v) => !v)
       } else if ((e.ctrlKey || e.metaKey) && (e.key === '=' || e.key === '+')) {
         e.preventDefault(); setZoom((z) => Math.min(3, z + 0.25))
       } else if ((e.ctrlKey || e.metaKey) && e.key === '-') {
@@ -893,8 +895,14 @@ export default function Session({ peerId, role, onEnd }: Props) {
         e.preventDefault(); setZoom(1)
       }
     }
+    // Close dropdowns on outside click
+    const onClick = () => { setShowActionsMenu(false); setShowShortcuts(false) }
     window.addEventListener('keydown', onKey)
-    return () => window.removeEventListener('keydown', onKey)
+    window.addEventListener('mousedown', onClick)
+    return () => {
+      window.removeEventListener('keydown', onKey)
+      window.removeEventListener('mousedown', onClick)
+    }
   }, [role, toggleFullscreen])
 
   function sendDisplayResolution(preset: DisplayPreset) {
@@ -1173,6 +1181,13 @@ export default function Session({ peerId, role, onEnd }: Props) {
           >
             <Crosshair size={14} />
           </ToolBtn>
+          <ToolBtn
+            onClick={() => setKeyPassthrough((v) => !v)}
+            title={keyPassthrough ? 'Key pass-through ON — click to type locally (Ctrl/⌘ /)' : 'Key pass-through OFF — keys stay local (Ctrl/⌘ /)'}
+            active={keyPassthrough}
+          >
+            <Keyboard size={14} />
+          </ToolBtn>
 
           {/* Remote actions dropdown */}
           <div className="relative">
@@ -1217,7 +1232,11 @@ export default function Session({ peerId, role, onEnd }: Props) {
                   <Moon size={12} /> Sleep
                 </button>
                 <button
-                  onClick={() => { sendSpecialKey('restart'); setShowActionsMenu(false) }}
+                  onClick={() => {
+                    if (!window.confirm('Restart the remote computer now?')) return
+                    sendSpecialKey('restart')
+                    setShowActionsMenu(false)
+                  }}
                   className="w-full flex items-center gap-2.5 px-3 py-1.5 text-xs text-amber-400/80 hover:bg-surface-elevated transition-colors"
                 >
                   <Power size={12} /> Restart…
@@ -1269,6 +1288,7 @@ export default function Session({ peerId, role, onEnd }: Props) {
                     ['Ctrl/⌘ 0', 'Reset zoom'],
                     ['Ctrl/⌘ M', 'Toggle mic'],
                     ['Ctrl/⌘ ⇧ R', 'Toggle recording'],
+                    ['Ctrl/⌘ /', 'Toggle key pass-through'],
                     ['Esc', 'Exit pointer lock / menus'],
                   ].map(([key, desc]) => (
                     <div key={key} className="flex justify-between gap-3">
@@ -1487,6 +1507,7 @@ export default function Session({ peerId, role, onEnd }: Props) {
           recording={recording}
           onRecordingChunk={handleRecordingDone}
           pointerLockEnabled={pointerLockEnabled}
+          keyPassthrough={keyPassthrough}
         />
       </div>
     </div>
