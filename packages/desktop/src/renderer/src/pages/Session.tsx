@@ -476,6 +476,16 @@ export default function Session({ peerId, role, onEnd }: Props) {
       } catch {}
     }
 
+    // Keep agent's screen awake during the session
+    let wakeLock: WakeLockSentinel | null = null
+    if ('wakeLock' in navigator) {
+      (navigator as any).wakeLock.request('screen').then((wl: WakeLockSentinel) => {
+        wakeLock = wl
+        diag('wake lock acquired — screen will stay on')
+      }).catch(() => {})
+    }
+    agentCleanups.push(() => { wakeLock?.release().catch(() => {}) })
+
     inputDc.onopen = async () => {
       diag('input DC open — starting input worker')
       invoke('start_input_worker').catch(() => {})
@@ -913,7 +923,11 @@ export default function Session({ peerId, role, onEnd }: Props) {
     if (role !== 'controller') return
     const onKey = (e: KeyboardEvent) => {
       if (e.key === 'F11') { e.preventDefault(); toggleFullscreen() }
-      else if (e.key === 'Escape') { setShowActionsMenu(false); setShowShortcuts(false) }
+      else if (e.key === 'Escape') {
+        setShowActionsMenu(false); setShowShortcuts(false)
+        // Also exit fullscreen on Escape
+        if (fullscreen) { setFullscreen(false); getCurrentWindow().setFullscreen(false).catch(() => {}); setToolbarHidden(false) }
+      }
       else if ((e.ctrlKey || e.metaKey) && e.key === 'm') { e.preventDefault(); toggleMic() }
       else if ((e.ctrlKey || e.metaKey) && e.shiftKey && (e.key === 'r' || e.key === 'R')) {
         e.preventDefault(); setRecording((v) => !v)
@@ -939,7 +953,7 @@ export default function Session({ peerId, role, onEnd }: Props) {
       window.removeEventListener('keydown', onKey)
       window.removeEventListener('mousedown', onClick)
     }
-  }, [role, toggleFullscreen])
+  }, [role, toggleFullscreen, fullscreen])
 
   function sendDisplayResolution(preset: DisplayPreset) {
     setDisplayPreset(preset)
@@ -1111,6 +1125,14 @@ export default function Session({ peerId, role, onEnd }: Props) {
               {iceType === 'host' ? 'LAN' : iceType === 'srflx' ? 'P2P' : 'TURN'}
             </span>
           )}
+          {connState === 'connected' && (
+            <span
+              className="text-xs px-1.5 py-0.5 rounded bg-emerald-900/30 text-emerald-500 font-mono flex items-center gap-1"
+              title="End-to-end encrypted via DTLS-SRTP (WebRTC standard)"
+            >
+              <Lock size={9} /> E2EE
+            </span>
+          )}
           <span className="text-xs px-1.5 py-0.5 rounded bg-surface text-slate-400">Controller</span>
         </div>
 
@@ -1278,6 +1300,12 @@ export default function Session({ peerId, role, onEnd }: Props) {
                   <Lock size={12} /> Ctrl+Alt+Del
                 </button>
                 <button
+                  onClick={() => { sendSpecialKey('show_desktop'); setShowActionsMenu(false) }}
+                  className="w-full flex items-center gap-2.5 px-3 py-1.5 text-xs text-slate-300 hover:bg-surface-elevated transition-colors"
+                >
+                  <Monitor size={12} /> Show Desktop
+                </button>
+                <button
                   onClick={() => {
                     const dc = dcRef.current
                     if (dc?.readyState === 'open') dc.send(JSON.stringify({ type: 'screenshot' }))
@@ -1303,6 +1331,16 @@ export default function Session({ peerId, role, onEnd }: Props) {
                   className="w-full flex items-center gap-2.5 px-3 py-1.5 text-xs text-amber-400/80 hover:bg-surface-elevated transition-colors"
                 >
                   <Power size={12} /> Restart…
+                </button>
+                <button
+                  onClick={() => {
+                    if (!window.confirm('Shut down the remote computer? This will end the session.')) return
+                    sendSpecialKey('shutdown')
+                    setShowActionsMenu(false)
+                  }}
+                  className="w-full flex items-center gap-2.5 px-3 py-1.5 text-xs text-red-400/80 hover:bg-surface-elevated transition-colors"
+                >
+                  <Power size={12} /> Shut Down…
                 </button>
               </div>
             )}
@@ -1345,7 +1383,7 @@ export default function Session({ peerId, role, onEnd }: Props) {
                 <p className="text-xs font-semibold text-slate-300 mb-2">Keyboard Shortcuts</p>
                 <div className="space-y-1 text-xs text-slate-400 font-mono">
                   {[
-                    ['F11', 'Toggle fullscreen'],
+                    ['F11 / Esc', 'Toggle fullscreen'],
                     ['Ctrl/⌘ +', 'Zoom in'],
                     ['Ctrl/⌘ -', 'Zoom out'],
                     ['Ctrl/⌘ 0', 'Reset zoom'],

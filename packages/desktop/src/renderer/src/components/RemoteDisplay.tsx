@@ -17,12 +17,14 @@ interface Props {
 export default function RemoteDisplay({ framesChannel, dataChannel, remoteScreenSize, zoom, stretch, connState, recording, onRecordingChunk, pointerLockEnabled = false, keyPassthrough = true, onLocalZoom }: Props) {
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const containerRef = useRef<HTMLDivElement>(null)
+  const imeRef = useRef<HTMLTextAreaElement>(null)
   const dcRef = useRef(dataChannel)
   const lastMoveSentRef = useRef(0)
   const heldModsRef = useRef({ ctrl: false, shift: false, alt: false, meta: false })
   const wheelAccRef = useRef(0)  // accumulated vertical scroll for trackpad sub-tick events
   const wheelAccXRef = useRef(0) // accumulated horizontal scroll
   const pointerLockedRef = useRef(false)
+  const isComposingRef = useRef(false)
   const [frozen, setFrozen] = useState(false)
   const [hasFrames, setHasFrames] = useState(false)
   const [pointerLocked, setPointerLocked] = useState(false)
@@ -342,6 +344,7 @@ export default function RemoteDisplay({ framesChannel, dataChannel, remoteScreen
 
   const onKeyDown = useCallback((e: React.KeyboardEvent) => {
     if (!keyPassthrough) return
+    if (isComposingRef.current) return // let IME handle composition keys
     e.preventDefault()
     if (e.key === 'Control') heldModsRef.current.ctrl = true
     else if (e.key === 'Shift') heldModsRef.current.shift = true
@@ -355,6 +358,7 @@ export default function RemoteDisplay({ framesChannel, dataChannel, remoteScreen
 
   const onKeyUp = useCallback((e: React.KeyboardEvent) => {
     if (!keyPassthrough) return
+    if (isComposingRef.current) return
     e.preventDefault()
     if (e.key === 'Control') heldModsRef.current.ctrl = false
     else if (e.key === 'Shift') heldModsRef.current.shift = false
@@ -364,6 +368,16 @@ export default function RemoteDisplay({ framesChannel, dataChannel, remoteScreen
       type: 'keyup', key: e.key, code: e.code,
       modifiers: { ctrl: e.ctrlKey, shift: e.shiftKey, alt: e.altKey, meta: e.metaKey }
     })
+  }, [dataChannel, keyPassthrough])
+
+  const onCompositionStart = useCallback(() => { isComposingRef.current = true }, [])
+  const onCompositionEnd = useCallback((e: React.CompositionEvent) => {
+    isComposingRef.current = false
+    const text = e.data
+    if (text && keyPassthrough) {
+      // Send composed IME text as clipboard paste to the remote
+      sendInput({ type: 'clipboard', text })
+    }
   }, [dataChannel, keyPassthrough])
 
   const onMouseLeave = useCallback((e: React.MouseEvent) => {
@@ -390,7 +404,17 @@ export default function RemoteDisplay({ framesChannel, dataChannel, remoteScreen
       tabIndex={0}
       onKeyDown={onKeyDown}
       onKeyUp={onKeyUp}
+      onCompositionStart={onCompositionStart}
+      onCompositionEnd={onCompositionEnd}
     >
+      {/* Off-screen textarea for IME composition (CJK and other composing input methods) */}
+      <textarea
+        ref={imeRef}
+        aria-hidden="true"
+        style={{ position: 'fixed', left: '-9999px', top: 0, width: 1, height: 1, opacity: 0 }}
+        tabIndex={-1}
+        readOnly
+      />
       <canvas
         ref={canvasRef}
         style={canvasStyle}

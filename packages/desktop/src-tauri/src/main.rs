@@ -248,8 +248,7 @@ fn check_macos_permissions() -> serde_json::Value {
     #[cfg(target_os = "macos")]
     {
         let accessibility = check_ax_permission();
-        // Screen recording: attempt a quick capture; if it returns nothing, permission is denied
-        let screen_recording = capture::capture_screen_at(0).is_some();
+        let screen_recording = check_screen_recording_permission();
         serde_json::json!({ "accessibility": accessibility, "screenRecording": screen_recording })
     }
     #[cfg(not(target_os = "macos"))]
@@ -264,6 +263,17 @@ fn check_ax_permission() -> bool {
         fn AXIsProcessTrusted() -> c_int;
     }
     unsafe { AXIsProcessTrusted() != 0 }
+}
+
+#[cfg(target_os = "macos")]
+fn check_screen_recording_permission() -> bool {
+    // CGPreflightScreenCaptureAccess: instant flag check, no frame captured.
+    // Available since macOS 10.15. Falls back to capture attempt on older systems.
+    #[link(name = "CoreGraphics", kind = "framework")]
+    extern "C" {
+        fn CGPreflightScreenCaptureAccess() -> bool;
+    }
+    unsafe { CGPreflightScreenCaptureAccess() }
 }
 
 /// Open macOS System Settings to a specific privacy pane.

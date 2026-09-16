@@ -69,7 +69,7 @@ mod platform {
         fn CGEventCreateKeyboardEvent(
             src: *mut c_void, vk: u16, down: bool,
         ) -> *mut c_void;
-            // CGEventCreateScrollWheelEvent2: fixed-arity version supporting up to 3 axes
+        // CGEventCreateScrollWheelEvent2: fixed-arity version supporting up to 3 axes
         fn CGEventCreateScrollWheelEvent2(
             src: *mut c_void, unit: u32, wc: u32, w1: i32, w2: i32, w3: i32,
         ) -> *mut c_void;
@@ -78,6 +78,7 @@ mod platform {
         fn CGEventSetIntegerValueField(ev: *mut c_void, field: i32, val: i64);
         fn CGEventGetLocation(ev: *mut c_void) -> CGPoint;
         fn CGEventCreate(src: *mut c_void) -> *mut c_void;
+        fn CGEventKeyboardSetUnicodeString(ev: *mut c_void, len: usize, chars: *const u16);
         fn CFRelease(cf: *const c_void);
     }
 
@@ -250,6 +251,24 @@ mod platform {
                         if m["alt"].as_bool().unwrap_or(false)   { flags |= F_ALT; }
                         if m["meta"].as_bool().unwrap_or(false)  { flags |= F_CMD; }
                         post_key(vk, down, flags);
+                    } else if down && key.chars().count() == 1 {
+                        // Unicode fallback: chars not in VK table (accented, CJK, emoji, etc.)
+                        let ch = key.chars().next().unwrap();
+                        let mut buf = [0u16; 2];
+                        let encoded = ch.encode_utf16(&mut buf);
+                        let len = encoded.len();
+                        let ev_dn = CGEventCreateKeyboardEvent(std::ptr::null_mut(), 0, true);
+                        if !ev_dn.is_null() {
+                            CGEventKeyboardSetUnicodeString(ev_dn, len, buf.as_ptr());
+                            CGEventPost(HID, ev_dn);
+                            CFRelease(ev_dn);
+                        }
+                        let ev_up = CGEventCreateKeyboardEvent(std::ptr::null_mut(), 0, false);
+                        if !ev_up.is_null() {
+                            CGEventKeyboardSetUnicodeString(ev_up, len, buf.as_ptr());
+                            CGEventPost(HID, ev_up);
+                            CFRelease(ev_up);
+                        }
                     }
                 }
 
@@ -321,6 +340,18 @@ mod platform {
                                 .args(["-e", "tell app \"System Events\" to restart"])
                                 .spawn();
                         }
+                        "show_desktop" => {
+                            // macOS: Mission Control show desktop — Cmd+F3 (fn key 3 = show desktop)
+                            // Alternatively: expose all windows via Ctrl+F3
+                            let _ = std::process::Command::new("osascript")
+                                .args(["-e", "tell application \"Finder\" to set visible of every process whose frontmost is true to false"])
+                                .spawn();
+                        }
+                        "shutdown" => {
+                            let _ = std::process::Command::new("osascript")
+                                .args(["-e", "tell app \"System Events\" to shut down"])
+                                .spawn();
+                        }
                         _ => {}
                     }
                 }
@@ -349,13 +380,33 @@ mod platform {
     const KEYUP:      u32 = 0x0002;
     const XBUTTON1:   u32 = 0x0001; // back
     const XBUTTON2:   u32 = 0x0002; // forward
+    const KEYEVENTF_UNICODE: u32 = 0x0004;
+
+    // INPUT / KEYBDINPUT structs for SendInput
+    // sizeof(KEYBDINPUT)=20, sizeof(MOUSEINPUT)=28 — union rounds to 32 (align 8), total INPUT=40
+    #[repr(C)]
+    struct KeybdInput { wvk: u16, w_scan: u16, dw_flags: u32, time: u32, dw_extra: usize }
+    #[repr(C)]
+    union InputUnion { ki: std::mem::ManuallyDrop<KeybdInput>, _pad: [u8; 28] }
+    #[repr(C)]
+    struct Input { r#type: u32, u: InputUnion }
 
     #[link(name = "user32")]
     extern "system" {
         fn SetCursorPos(x: i32, y: i32) -> i32;
         fn mouse_event(dw_flags: u32, dx: u32, dy: u32, dw_data: u32, dw_extra: usize);
         fn keybd_event(bvk: u8, b_scan: u8, dw_flags: u32, dw_extra: usize);
+        fn SendInput(n_inputs: u32, p_inputs: *mut Input, cb_size: i32) -> u32;
         fn LockWorkStation() -> i32;
+    }
+
+    unsafe fn send_unicode_char(ch: u16, key_up: bool) {
+        let flags = KEYEVENTF_UNICODE | if key_up { KEYUP } else { 0 };
+        let mut inp = Input {
+            r#type: 1, // INPUT_KEYBOARD
+            u: InputUnion { ki: std::mem::ManuallyDrop::new(KeybdInput { wvk: 0, w_scan: ch, dw_flags: flags, time: 0, dw_extra: 0 }) },
+        };
+        SendInput(1, &mut inp, std::mem::size_of::<Input>() as i32);
     }
 
     fn web_key_to_vk(key: &str) -> Option<u8> {
@@ -457,7 +508,18 @@ mod platform {
                     if m["shift"].as_bool().unwrap_or(false) { keybd_event(0x10, 0, 0, 0); }
                     if m["alt"].as_bool().unwrap_or(false)   { keybd_event(0x12, 0, 0, 0); }
                     if m["meta"].as_bool().unwrap_or(false)  { keybd_event(0x5B, 0, 0, 0); }
-                    if let Some(vk) = web_key_to_vk(key) { keybd_event(vk, 0, 0, 0); }
+                    if let Some(vk) = web_key_to_vk(key) {
+                        keybd_event(vk, 0, 0, 0);
+                    } else if key.chars().count() == 1 {
+                        // Unicode fallback via SendInput KEYEVENTF_UNICODE
+                        let ch = key.chars().next().unwrap();
+                        let mut buf = [0u16; 2];
+                        let units = ch.encode_utf16(&mut buf);
+                        for &unit in units.iter() {
+                            send_unicode_char(unit, false);
+                            send_unicode_char(unit, true);
+                        }
+                    }
                 }
 
                 "keyup" => {
@@ -533,6 +595,18 @@ mod platform {
                         "restart" => {
                             let _ = std::process::Command::new("shutdown")
                                 .args(["/r", "/t", "10"])
+                                .spawn();
+                        }
+                        "show_desktop" => {
+                            // Windows: Win+D toggles show desktop
+                            keybd_event(0x5B, 0, 0, 0);       // Win ↓
+                            keybd_event(0x44, 0, 0, 0);       // D ↓
+                            keybd_event(0x44, 0, KEYUP, 0);   // D ↑
+                            keybd_event(0x5B, 0, KEYUP, 0);   // Win ↑
+                        }
+                        "shutdown" => {
+                            let _ = std::process::Command::new("shutdown")
+                                .args(["/s", "/t", "10"])
                                 .spawn();
                         }
                         _ => {}
