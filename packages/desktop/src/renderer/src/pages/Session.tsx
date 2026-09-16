@@ -557,7 +557,7 @@ export default function Session({ peerId, role, onEnd }: Props) {
     const clipSyncInterval = setInterval(async () => {
       try {
         const text = await navigator.clipboard.readText()
-        if (text && text !== lastClipboard) {
+        if (text && text !== lastClipboard && text.length < 1_048_576) {
           lastClipboard = text
           const d = dcRef.current
           if (d?.readyState === 'open') d.send(JSON.stringify({ type: 'agent_clipboard', text }))
@@ -635,7 +635,9 @@ export default function Session({ peerId, role, onEnd }: Props) {
               setAgentMonitors(msg.monitors ?? [])
             } else if (msg.type === 'agent_clipboard') {
               navigator.clipboard.writeText(msg.text ?? '').catch(() => {})
-              diag(`remote clipboard pulled (${(msg.text ?? '').length} chars)`)
+              diag(`remote clipboard synced (${(msg.text ?? '').length} chars)`)
+              setToast(`Clipboard synced from remote`)
+              setTimeout(() => setToast(null), 1500)
             } else if (msg.type === 'stats') {
               setRenderStats((prev) => ({ ...prev, fps: msg.fps, decodeMs: msg.decodeMs }))
             } else if (msg.type === 'bitrate_info') {

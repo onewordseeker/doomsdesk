@@ -475,17 +475,43 @@ export default function Home() {
                 )}
               </div>
             ) : (
-              <div className="flex items-center justify-center h-full p-8">
-                <div className="text-center">
-                  <div className="w-20 h-20 rounded-2xl bg-surface border border-surface-border flex items-center justify-center mx-auto mb-6">
-                    <img src={appIcon} className="w-12 h-12 rounded-full" alt="DoomsDesk" />
-                  </div>
-                  <h2 className="text-lg font-semibold text-white mb-2">Ready to Receive</h2>
-                  <p className="text-sm text-slate-500 max-w-xs mx-auto">
-                    Share your{' '}
-                    <span className="text-white font-mono">{formatId(deviceId)}</span> and password
-                    with the person helping you. They can then connect to your device.
+              <div className="flex flex-col items-center justify-center h-full p-8 gap-6">
+                <div>
+                  <h2 className="text-lg font-semibold text-white mb-2 text-center">Ready to Receive Help</h2>
+                  <p className="text-sm text-slate-500 text-center max-w-sm mx-auto">
+                    Share these details with the person helping you. They'll enter them on their DoomsDesk to connect.
                   </p>
+                </div>
+                <div className="bg-surface border border-surface-border rounded-xl p-5 w-full max-w-xs mx-auto space-y-4">
+                  <div>
+                    <p className="text-xs text-slate-500 mb-1">Your Device ID</p>
+                    <div className="flex items-center justify-between">
+                      <span className="text-xl font-mono font-bold text-white tracking-widest">{formatId(deviceId)}</span>
+                      <button
+                        onClick={() => copy(deviceId.replace(/-/g, ''), 'id')}
+                        className="text-xs text-brand hover:text-brand-hover flex items-center gap-1"
+                      >
+                        <Copy size={11} />
+                        {copyFeedback === 'id' ? 'Copied!' : 'Copy'}
+                      </button>
+                    </div>
+                  </div>
+                  <div>
+                    <p className="text-xs text-slate-500 mb-1">Session Password</p>
+                    <div className="flex items-center justify-between">
+                      <span className="text-xl font-mono font-bold text-white tracking-widest">{randomPw || '------'}</span>
+                      <button
+                        onClick={() => copy(randomPw, 'pw')}
+                        className="text-xs text-brand hover:text-brand-hover flex items-center gap-1"
+                      >
+                        <Copy size={11} />
+                        {copyFeedback === 'pw' ? 'Copied!' : 'Copy'}
+                      </button>
+                    </div>
+                  </div>
+                </div>
+                <div className="text-xs text-slate-600 text-center max-w-xs">
+                  A banner will appear on your screen during the session. Click <span className="text-slate-400">End</span> to disconnect at any time.
                 </div>
               </div>
             )}

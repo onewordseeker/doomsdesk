@@ -460,7 +460,7 @@ mod platform {
         }
 
         pub fn set_bitrate(&mut self, bps: u32) {
-            let clamped = bps.clamp(2_000_000, 8_000_000);
+            let clamped = bps.clamp(2_000_000, 20_000_000);
             if clamped == self.current_bps { return; }
             if let Some(enc) = make_encoder(self.width, self.height, clamped) {
                 self.enc = enc;
