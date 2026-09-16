@@ -54,6 +54,7 @@ export default function Home() {
   const [showSettings, setShowSettings] = useState(false)
   const [incomingConn, setIncomingConn] = useState<{ sourceId: string } | null>(null)
   const [recentDevices, setRecentDevices] = useState<RecentDevice[]>(loadRecents)
+  const [serverRtt, setServerRtt] = useState<number | null>(null)
   const pollRef = useRef<ReturnType<typeof setInterval>>()
 
   // Refs so the stale signaling-message closure can read current form values
@@ -93,9 +94,14 @@ export default function Home() {
       }
     )
 
+    const unsubRtt = listen<{ rtt: number }>('signaling-rtt', (e) => {
+      setServerRtt(e.payload.rtt)
+    })
+
     return () => {
       clearInterval(pollRef.current)
       unsubSignal.then((f) => f())
+      unsubRtt.then((f) => f())
     }
   }, [])
 
@@ -167,6 +173,9 @@ export default function Home() {
           {serverOnline ? (
             <span className="flex items-center gap-1.5 text-emerald-400">
               <Wifi size={12} /> Online
+              {serverRtt !== null && (
+                <span className="text-slate-500 font-mono">{serverRtt}ms</span>
+              )}
             </span>
           ) : (
             <span className="flex items-center gap-1.5 text-slate-500">
