@@ -1011,6 +1011,12 @@ export default function Session({ peerId, role, onEnd }: Props) {
                   <Activity size={12} /> Task Manager
                 </button>
                 <button
+                  onClick={() => { sendSpecialKey('ctrl_alt_del'); setShowActionsMenu(false) }}
+                  className="w-full flex items-center gap-2.5 px-3 py-1.5 text-xs text-slate-300 hover:bg-surface-elevated transition-colors"
+                >
+                  <Lock size={12} /> Ctrl+Alt+Del
+                </button>
+                <button
                   onClick={() => {
                     const dc = dcRef.current
                     if (dc?.readyState === 'open') dc.send(JSON.stringify({ type: 'screenshot' }))

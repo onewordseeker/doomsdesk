@@ -177,9 +177,16 @@ mod platform {
                     _        => post_mouse(LU, x, y, BL),
                 },
 
+                "dblclick" => {
+                    // Two rapid left clicks
+                    post_mouse(LD, x, y, BL); post_mouse(LU, x, y, BL);
+                    std::thread::sleep(std::time::Duration::from_millis(30));
+                    post_mouse(LD, x, y, BL); post_mouse(LU, x, y, BL);
+                }
+
                 "wheel" => {
                     let dy = ev["deltaY"].as_f64().unwrap_or(0.0);
-                    let ticks = ((-dy) / 5.0) as i32;
+                    let ticks = ((-dy) / 20.0) as i32;
                     if ticks != 0 { post_scroll(ticks); }
                 }
 
@@ -240,6 +247,12 @@ mod platform {
                         "task_mgr" | "ctrl_shift_esc" => {
                             let _ = std::process::Command::new("open")
                                 .args(["-a", "Activity Monitor"])
+                                .spawn();
+                        }
+                        "ctrl_alt_del" => {
+                            // macOS has no equivalent — open Force Quit as closest analog
+                            let _ = std::process::Command::new("open")
+                                .args(["-a", "Force Quit Applications"])
                                 .spawn();
                         }
                         _ => {}
@@ -335,9 +348,17 @@ mod platform {
                     _        => mouse_event(LEFTUP,   0, 0, 0, 0),
                 },
 
+                "dblclick" => {
+                    SetCursorPos(x, y);
+                    mouse_event(LEFTDOWN, 0, 0, 0, 0); mouse_event(LEFTUP, 0, 0, 0, 0);
+                    std::thread::sleep(std::time::Duration::from_millis(30));
+                    mouse_event(LEFTDOWN, 0, 0, 0, 0); mouse_event(LEFTUP, 0, 0, 0, 0);
+                }
+
                 "wheel" => {
                     let dy = ev["deltaY"].as_f64().unwrap_or(0.0);
-                    let delta = ((-dy) * 3.0) as i32;
+                    // deltaY already normalized to ~20px per line by frontend accumulator
+                    let delta = ((-dy) * 6.0) as i32;
                     if delta != 0 {
                         mouse_event(WHEEL, 0, 0, delta as u32, 0);
                     }
@@ -402,6 +423,14 @@ mod platform {
                             keybd_event(0x1B, 0, KEYUP, 0);
                             keybd_event(0x10, 0, KEYUP, 0);
                             keybd_event(0x11, 0, KEYUP, 0);
+                        }
+                        "ctrl_alt_del" => {
+                            // Simulate Ctrl+Alt+Del via SAS (Secure Attention Sequence)
+                            // keybd_event cannot send CAD directly; use the SAS stub DLL approach via powershell
+                            let _ = std::process::Command::new("powershell")
+                                .args(["-NoProfile", "-NonInteractive", "-Command",
+                                       "(New-Object -comObject Shell.Application).WindowsSecurity()"])
+                                .spawn();
                         }
                         _ => {}
                     }

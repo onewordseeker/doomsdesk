@@ -17,6 +17,7 @@ export default function RemoteDisplay({ framesChannel, dataChannel, remoteScreen
   const dcRef = useRef(dataChannel)
   const lastMoveSentRef = useRef(0)
   const heldModsRef = useRef({ ctrl: false, shift: false, alt: false, meta: false })
+  const wheelAccRef = useRef(0) // accumulated scroll delta for trackpad sub-tick events
   const [frozen, setFrozen] = useState(false)
   const [hasFrames, setHasFrames] = useState(false)
   const recorderRef = useRef<MediaRecorder | null>(null)
@@ -258,8 +259,24 @@ export default function RemoteDisplay({ framesChannel, dataChannel, remoteScreen
   const onContextMenu = useCallback((e: React.MouseEvent) => { e.preventDefault() }, [])
 
   const onWheel = useCallback((e: React.WheelEvent) => {
-    sendInput({ type: 'wheel', deltaX: e.deltaX, deltaY: e.deltaY })
+    e.preventDefault()
+    let dy = e.deltaY
+    // Pixel mode (trackpad): accumulate until we have at least one line-equivalent
+    if (e.deltaMode === 0) {
+      wheelAccRef.current += dy
+      const lines = Math.trunc(wheelAccRef.current / 20)
+      if (lines === 0) return
+      wheelAccRef.current -= lines * 20
+      dy = lines * 20
+    }
+    sendInput({ type: 'wheel', deltaX: e.deltaX, deltaY: dy })
   }, [dataChannel])
+
+  const onDblClick = useCallback((e: React.MouseEvent) => {
+    e.preventDefault()
+    const { x, y } = toRemote(e)
+    sendInput({ type: 'dblclick', x, y })
+  }, [dataChannel, remoteScreenSize, stretch])
 
   const onKeyDown = useCallback((e: React.KeyboardEvent) => {
     e.preventDefault()
@@ -316,6 +333,7 @@ export default function RemoteDisplay({ framesChannel, dataChannel, remoteScreen
         onMouseDown={onMouseDown}
         onMouseUp={onMouseUp}
         onMouseLeave={onMouseLeave}
+        onDoubleClick={onDblClick}
         onContextMenu={onContextMenu}
         onWheel={onWheel}
         className="cursor-crosshair select-none"
