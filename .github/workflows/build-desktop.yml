@@ -10,7 +10,76 @@ permissions:
   contents: write
 
 jobs:
+  build-macos:
+    runs-on: macos-latest
+    outputs:
+      release-id: ${{ steps.build.outputs.releaseId }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v3
+        with:
+          version: 9
+
+      - name: Get pnpm store path
+        id: pnpm-cache
+        run: echo "store=$(pnpm store path)" >> $GITHUB_OUTPUT
+
+      - name: Cache pnpm store
+        uses: actions/cache@v4
+        with:
+          path: ${{ steps.pnpm-cache.outputs.store }}
+          key: pnpm-${{ runner.os }}-${{ hashFiles('**/pnpm-lock.yaml') }}
+          restore-keys: pnpm-${{ runner.os }}-
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: packages/desktop/src-tauri -> target
+          cache-on-failure: true
+          cache-all-crates: true
+
+      - name: Install frontend dependencies
+        run: pnpm install
+
+      - name: Build Tauri (macOS universal)
+        id: build
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          APPLE_SIGNING_IDENTITY: "-"
+        with:
+          projectPath: packages/desktop
+          tauriScript: pnpm tauri
+          tagName: ${{ github.ref_name }}
+          releaseName: DoomsDesk ${{ github.ref_name }}
+          releaseBody: |
+            DoomsDesk desktop app release.
+
+            Connects to: https://doomsdesk.hamidentifier.cloud
+
+            **macOS users:** If you see "damaged" error, open Terminal and run:
+            ```
+            xattr -cr ~/Downloads/DoomsDesk.dmg
+            ```
+            Then open the .dmg again.
+          releaseDraft: true
+          prerelease: false
+          args: --target universal-apple-darwin
+
   build-windows:
+    needs: build-macos
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -59,76 +128,19 @@ jobs:
         with:
           projectPath: packages/desktop
           tauriScript: pnpm tauri
-          tagName: ${{ github.ref_name }}
-          releaseName: DoomsDesk ${{ github.ref_name }}
-          releaseBody: |
-            DoomsDesk desktop app release.
+          releaseId: ${{ needs.build-macos.outputs.release-id }}
 
-            Connects to: https://doomsdesk.hamidentifier.cloud
-          releaseDraft: false
-          prerelease: false
-
-  build-macos:
-    runs-on: macos-latest
+  publish-release:
+    needs: [build-windows, build-macos]
+    runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
+      - name: Publish Release
+        uses: actions/github-script@v7
         with:
-          node-version: 22
-
-      - name: Install pnpm
-        uses: pnpm/action-setup@v3
-        with:
-          version: 9
-
-      - name: Get pnpm store path
-        id: pnpm-cache
-        run: echo "store=$(pnpm store path)" >> $GITHUB_OUTPUT
-
-      - name: Cache pnpm store
-        uses: actions/cache@v4
-        with:
-          path: ${{ steps.pnpm-cache.outputs.store }}
-          key: pnpm-${{ runner.os }}-${{ hashFiles('**/pnpm-lock.yaml') }}
-          restore-keys: pnpm-${{ runner.os }}-
-
-      - name: Install Rust stable
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: aarch64-apple-darwin,x86_64-apple-darwin
-
-      - name: Cache Rust dependencies
-        uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: packages/desktop/src-tauri -> target
-          cache-on-failure: true
-          cache-all-crates: true
-
-      - name: Install frontend dependencies
-        run: pnpm install
-
-      - name: Build Tauri (macOS universal)
-        uses: tauri-apps/tauri-action@v0
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          APPLE_SIGNING_IDENTITY: "-"
-        with:
-          projectPath: packages/desktop
-          tauriScript: pnpm tauri
-          tagName: ${{ github.ref_name }}
-          releaseName: DoomsDesk ${{ github.ref_name }}
-          releaseBody: |
-            DoomsDesk desktop app release.
-
-            Connects to: https://doomsdesk.hamidentifier.cloud
-
-            **macOS users:** If you see "damaged" error, open Terminal and run:
-            ```
-            xattr -cr ~/Downloads/DoomsDesk.dmg
-            ```
-            Then open the .dmg again.
-          releaseDraft: false
-          prerelease: false
-          args: --target universal-apple-darwin
+          script: |
+            await github.rest.repos.updateRelease({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              release_id: Number('${{ needs.build-macos.outputs.release-id }}'),
+              draft: false,
+            });
