@@ -113,6 +113,12 @@ export default function Session({ peerId, role, onEnd }: Props) {
     return () => clearTimeout(t)
   }, [doneFtIds])
 
+  // Auto-scroll diagnostics to bottom when new lines arrive
+  useEffect(() => {
+    diagEndRef.current?.scrollIntoView({ behavior: 'instant' })
+  }, [diagLines])
+
+  const diagEndRef = useRef<HTMLDivElement>(null)
   const pcRef = useRef<RTCPeerConnection | null>(null)
   const dcRef = useRef<RTCDataChannel | null>(null)
   const fileDcRef = useRef<RTCDataChannel | null>(null)
@@ -221,6 +227,9 @@ export default function Session({ peerId, role, onEnd }: Props) {
         connected = true
         clearTimeout(connTimeout)
         setConnState('connected')
+        if (role === 'controller') {
+          invoke('update_tray_tooltip', { tooltip: `DoomsDesk — Active (${peerId})` }).catch(() => {})
+        }
       } else if (pc.connectionState === 'disconnected') {
         setConnState('disconnected')
         // Attempt ICE restart after a brief pause
@@ -233,6 +242,7 @@ export default function Session({ peerId, role, onEnd }: Props) {
       } else if (pc.connectionState === 'failed') {
         clearTimeout(connTimeout)
         setConnState('failed')
+        invoke('update_tray_tooltip', { tooltip: 'DoomsDesk' }).catch(() => {})
       }
     }
 
@@ -780,6 +790,7 @@ export default function Session({ peerId, role, onEnd }: Props) {
   function handleEnd() {
     invoke('send_signaling', { msg: { type: 'disconnect', targetId: peerId } })
     invoke('close_session')
+    invoke('update_tray_tooltip', { tooltip: 'DoomsDesk' }).catch(() => {})
     cleanup()
     onEnd()
   }
@@ -1276,6 +1287,7 @@ export default function Session({ peerId, role, onEnd }: Props) {
                 </div>
               ))
             )}
+            <div ref={diagEndRef} />
           </div>
         </div>
       )}
@@ -1358,8 +1370,7 @@ export default function Session({ peerId, role, onEnd }: Props) {
         onDrop={(e) => {
           e.preventDefault()
           setDragOver(false)
-          const files = Array.from(e.dataTransfer.files)
-          files.forEach((f) => sendFile(f))
+          Array.from(e.dataTransfer.files).filter((f) => f.size > 0).forEach(sendFile)
         }}
       >
         <RemoteDisplay

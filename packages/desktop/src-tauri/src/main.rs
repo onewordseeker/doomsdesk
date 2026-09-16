@@ -11,14 +11,17 @@ use config::Config;
 use input::InputWorker;
 use serde_json::Value;
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::sync::atomic::{AtomicU32, AtomicU64, AtomicU8, Ordering};
 use tauri::{
     menu::{Menu, MenuItem},
-    tray::{MouseButton, TrayIconBuilder, TrayIconEvent},
-    AppHandle, Emitter, Manager, State,
+    tray::{MouseButton, TrayIcon, TrayIconBuilder, TrayIconEvent},
+    AppHandle, Emitter, Manager, State, Wry,
 };
 use tokio::sync::{broadcast, Mutex as AsyncMutex};
+
+// Tray icon handle — set once during setup, then used for tooltip updates
+static TRAY: OnceLock<TrayIcon<Wry>> = OnceLock::new();
 
 struct AppState {
     config_path: Mutex<PathBuf>,
@@ -237,6 +240,14 @@ async fn save_received_file(app: AppHandle, name: String, data: Vec<u8>) -> Resu
         std::fs::write(&buf, &data).map_err(|e| e.to_string())?;
     }
     Ok(())
+}
+
+/// Update the system tray tooltip (e.g., to show active session count).
+#[tauri::command]
+fn update_tray_tooltip(tooltip: String) {
+    if let Some(tray) = TRAY.get() {
+        let _ = tray.set_tooltip(Some(tooltip.as_str()));
+    }
 }
 
 /// Regenerate the session password and re-register with the signaling server.
@@ -634,6 +645,7 @@ fn main() {
             refresh_random_password,
             set_launch_on_startup,
             get_launch_on_startup,
+            update_tray_tooltip,
         ])
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
@@ -654,7 +666,7 @@ fn setup_tray(app: &mut tauri::App) -> tauri::Result<()> {
     let show = MenuItem::with_id(app, "show", "Open DoomsDesk", true, None::<&str>)?;
     let menu = Menu::with_items(app, &[&show, &quit])?;
 
-    TrayIconBuilder::new()
+    let tray = TrayIconBuilder::new()
         .icon(icon)
         .menu(&menu)
         .tooltip("DoomsDesk")
@@ -683,5 +695,6 @@ fn setup_tray(app: &mut tauri::App) -> tauri::Result<()> {
             }
         })
         .build(app)?;
+    TRAY.set(tray).ok();
     Ok(())
 }
