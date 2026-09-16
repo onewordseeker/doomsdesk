@@ -735,8 +735,8 @@ export default function Session({ peerId, role, onEnd }: Props) {
     }
   }
 
-  function cleanup() {
-    clearInterval(durationRef.current)
+  function cleanup(keepDuration = false) {
+    if (!keepDuration) clearInterval(durationRef.current)
     clearInterval(screenCheckRef.current)
     if (role === 'agent') {
       invoke('stop_native_capture').catch(() => {})
@@ -745,10 +745,27 @@ export default function Session({ peerId, role, onEnd }: Props) {
       agentCleanupRef.current = null
     }
     micStreamRef.current?.getTracks().forEach((t) => t.stop())
+    micStreamRef.current = null
+    micSenderRef.current = null
     pcRef.current?.close()
     pcRef.current = null
     setFramesChannel(null)
     setDataChannel(null)
+  }
+
+  async function reconnect() {
+    diag('reconnecting…')
+    cleanup(true) // keep duration counter running
+    pendingTransfersRef.current.clear()
+    setMicActive(false)
+    setConnState('connecting')
+    setInitError('')
+    await new Promise((r) => setTimeout(r, 600))
+    initSession().catch((err) => {
+      const msg = String(err?.message ?? err)
+      diag(`RECONNECT ERROR: ${msg}`)
+      if (role !== 'agent') setInitError(msg)
+    })
   }
 
   function formatDuration(s: number) {
@@ -1171,12 +1188,22 @@ export default function Session({ peerId, role, onEnd }: Props) {
             <p className="text-slate-400 text-xs font-mono mb-5">
               {initError || 'ICE negotiation failed — the devices could not reach each other'}
             </p>
-            <button
-              onClick={handleEnd}
-              className="px-5 py-2 bg-surface border border-surface-border text-slate-300 text-sm rounded-lg hover:border-slate-500 transition-colors"
-            >
-              ← Back to Home
-            </button>
+            <div className="flex items-center justify-center gap-3">
+              <button
+                onClick={handleEnd}
+                className="px-5 py-2 bg-surface border border-surface-border text-slate-300 text-sm rounded-lg hover:border-slate-500 transition-colors"
+              >
+                ← Back to Home
+              </button>
+              {role === 'controller' && (
+                <button
+                  onClick={reconnect}
+                  className="px-5 py-2 bg-brand/20 border border-brand/40 text-brand text-sm rounded-lg hover:bg-brand/30 transition-colors"
+                >
+                  Retry
+                </button>
+              )}
+            </div>
           </div>
         </div>
       )}
@@ -1215,12 +1242,20 @@ export default function Session({ peerId, role, onEnd }: Props) {
         <div className="absolute bottom-0 right-0 z-20 w-96 max-h-64 bg-black/90 border border-slate-700 rounded-tl-lg overflow-hidden flex flex-col">
           <div className="flex items-center justify-between px-2 py-1 border-b border-slate-700">
             <span className="text-xs text-slate-400 font-mono">Diagnostics</span>
-            <button
-              onClick={() => navigator.clipboard.writeText(diagLines.join('\n'))}
-              className="text-xs text-slate-500 hover:text-white px-1"
-            >
-              Copy
-            </button>
+            <div className="flex gap-2">
+              <button
+                onClick={() => navigator.clipboard.writeText(diagLines.join('\n'))}
+                className="text-xs text-slate-500 hover:text-white px-1"
+              >
+                Copy
+              </button>
+              <button
+                onClick={() => setDiagLines([])}
+                className="text-xs text-slate-500 hover:text-white px-1"
+              >
+                Clear
+              </button>
+            </div>
           </div>
           <div className="flex-1 overflow-y-auto p-2 font-mono text-xs space-y-0.5">
             {diagLines.length === 0 ? (
@@ -1263,6 +1298,9 @@ export default function Session({ peerId, role, onEnd }: Props) {
                     m.from === 'me' ? 'bg-brand/20 text-brand' : 'bg-surface text-slate-300'
                   }`}>
                     {m.text}
+                  </span>
+                  <span className="text-slate-700 text-xs mt-0.5 px-1">
+                    {new Date(m.ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
                   </span>
                 </div>
               ))
