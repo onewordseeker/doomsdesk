@@ -951,6 +951,7 @@ dependencies = [
 name = "doomsdesk"
 version = "0.1.0"
 dependencies = [
+ "base64 0.22.1",
  "futures-util",
  "openh264",
  "screenshots",

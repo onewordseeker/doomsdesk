@@ -229,6 +229,23 @@ mod platform {
                     }
                 }
 
+                "send_keys" => {
+                    let combo = ev["combo"].as_str().unwrap_or("");
+                    match combo {
+                        "lock" => {
+                            let _ = std::process::Command::new(
+                                "/System/Library/CoreServices/Menu Extras/User.menu/Contents/Resources/CGSession"
+                            ).arg("-suspend").spawn();
+                        }
+                        "task_mgr" | "ctrl_shift_esc" => {
+                            let _ = std::process::Command::new("open")
+                                .args(["-a", "Activity Monitor"])
+                                .spawn();
+                        }
+                        _ => {}
+                    }
+                }
+
                 _ => {}
             }
         }
@@ -254,6 +271,7 @@ mod platform {
         fn SetCursorPos(x: i32, y: i32) -> i32;
         fn mouse_event(dw_flags: u32, dx: u32, dy: u32, dw_data: u32, dw_extra: usize);
         fn keybd_event(bvk: u8, b_scan: u8, dw_flags: u32, dw_extra: usize);
+        fn LockWorkStation() -> i32;
     }
 
     fn web_key_to_vk(key: &str) -> Option<u8> {
@@ -369,6 +387,23 @@ mod platform {
                         let _ = std::process::Command::new("powershell")
                             .args(["-NoProfile", "-NonInteractive", "-Command", &script])
                             .spawn();
+                    }
+                }
+
+                "send_keys" => {
+                    let combo = ev["combo"].as_str().unwrap_or("");
+                    match combo {
+                        "lock" => { LockWorkStation(); }
+                        "task_mgr" | "ctrl_shift_esc" => {
+                            // Ctrl+Shift+Esc opens Task Manager
+                            keybd_event(0x11, 0, 0, 0); // Ctrl ↓
+                            keybd_event(0x10, 0, 0, 0); // Shift ↓
+                            keybd_event(0x1B, 0, 0, 0); // Esc ↓
+                            keybd_event(0x1B, 0, KEYUP, 0);
+                            keybd_event(0x10, 0, KEYUP, 0);
+                            keybd_event(0x11, 0, KEYUP, 0);
+                        }
+                        _ => {}
                     }
                 }
 

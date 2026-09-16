@@ -396,6 +396,43 @@ fn set_capture_bitrate(state: State<'_, AppState>, bps: u32) {
     state.capture_bitrate.store(clamped, Ordering::Relaxed);
 }
 
+/// Capture the current display as a PNG and return base64-encoded bytes.
+/// Returns base64 to avoid the slow JSON number-array serialization of Vec<u8>.
+#[tauri::command]
+fn capture_screenshot_png(state: State<'_, AppState>) -> Result<String, String> {
+    use screenshots::image::{DynamicImage, RgbaImage, ImageFormat};
+    use std::io::Cursor;
+
+    let display_id = state.capture_display.load(Ordering::Relaxed);
+    let frame = capture::capture_screen_at(display_id)
+        .ok_or_else(|| "capture failed".to_string())?;
+
+    // macOS capture gives BGRX (kCGImageAlphaNoneSkipLast, little-endian).
+    // Swap R↔B and set A=255 to get proper RGBA for PNG encoding.
+    #[cfg(target_os = "macos")]
+    let pixel_data = {
+        let mut d = frame.data;
+        for i in (0..d.len()).step_by(4) {
+            d.swap(i, i + 2);
+            d[i + 3] = 255;
+        }
+        d
+    };
+    #[cfg(not(target_os = "macos"))]
+    let pixel_data = frame.data;
+
+    let img = RgbaImage::from_raw(frame.width, frame.height, pixel_data)
+        .ok_or_else(|| "invalid frame buffer".to_string())?;
+    let dyn_img = DynamicImage::ImageRgba8(img);
+
+    let mut buf = Cursor::new(Vec::new());
+    dyn_img.write_to(&mut buf, ImageFormat::Png)
+        .map_err(|e| e.to_string())?;
+
+    use base64::Engine;
+    Ok(base64::engine::general_purpose::STANDARD.encode(buf.into_inner()))
+}
+
 // ── Main ──────────────────────────────────────────────────────────────────────
 
 fn main() {
@@ -483,6 +520,7 @@ fn main() {
             list_monitors,
             set_capture_monitor,
             save_received_file,
+            capture_screenshot_png,
         ])
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {

@@ -6,7 +6,7 @@ import RemoteDisplay from '../components/RemoteDisplay'
 import {
   Maximize2, Minimize2, ZoomIn, ZoomOut, Expand, Shrink,
   Clipboard, X, Monitor, MessageSquare, Send, Tv2,
-  Upload, Download, Mic, MicOff
+  Upload, Download, Mic, MicOff, Lock, Activity, Camera
 } from 'lucide-react'
 
 interface Props {
@@ -244,7 +244,7 @@ export default function Session({ peerId, role, onEnd }: Props) {
     // File DC: agent receives files from controller
     fileDc.binaryType = 'arraybuffer'
     fileDc.onopen = () => diag('file DC open')
-    fileDc.onmessage = (ev) => {
+    fileDc.onmessage = async (ev) => {
       if (typeof ev.data === 'string') {
         const msg = JSON.parse(ev.data)
         if (msg.type === 'file_start') {
@@ -302,6 +302,33 @@ export default function Session({ peerId, role, onEnd }: Props) {
               inputDc.send(JSON.stringify({ type: 'agent_clipboard', text }))
             }
           }).catch(() => {})
+        } else if (msg.type === 'screenshot') {
+          // Capture a PNG of the current display and send via files DC
+          invoke<string>('capture_screenshot_png').then((b64) => {
+            const dc = fileDcRef.current
+            if (!dc || dc.readyState !== 'open') return
+            const binary = atob(b64)
+            const buf = new ArrayBuffer(binary.length)
+            const view = new Uint8Array(buf)
+            for (let i = 0; i < binary.length; i++) view[i] = binary.charCodeAt(i)
+            const id = crypto.randomUUID()
+            const ts = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19)
+            const name = `screenshot-${ts}.png`
+            dc.send(JSON.stringify({ type: 'file_start', id, name, size: buf.byteLength }))
+            const idBytes = new TextEncoder().encode(id.padEnd(36, ' ').slice(0, 36))
+            let offset = 0
+            const sendChunk = () => {
+              if (offset >= buf.byteLength) { dc.send(JSON.stringify({ type: 'file_end', id })); return }
+              const slice = buf.slice(offset, offset + FILE_CHUNK_SIZE)
+              const packet = new Uint8Array(36 + slice.byteLength)
+              packet.set(idBytes, 0)
+              packet.set(new Uint8Array(slice), 36)
+              dc.send(packet.buffer)
+              offset += slice.byteLength
+              setTimeout(sendChunk, dc.bufferedAmount > 1_048_576 ? 50 : 0)
+            }
+            sendChunk()
+          }).catch((e) => diag(`screenshot err: ${e}`))
         } else if (msg.type === 'chat') {
           diag(`[chat] ${msg.text ?? ''}`)
         } else {
@@ -661,6 +688,11 @@ export default function Session({ peerId, role, onEnd }: Props) {
     }
   }
 
+  function sendSpecialKey(combo: string) {
+    const dc = dcRef.current
+    if (dc?.readyState === 'open') dc.send(JSON.stringify({ type: 'send_keys', combo }))
+  }
+
   function pickAndSendFile() {
     const input = document.createElement('input')
     input.type = 'file'
@@ -800,6 +832,22 @@ export default function Session({ peerId, role, onEnd }: Props) {
 
           <ToolBtn onClick={toggleMic} title={micActive ? 'Mute mic' : 'Enable mic'} active={micActive}>
             {micActive ? <Mic size={14} /> : <MicOff size={14} />}
+          </ToolBtn>
+
+          <ToolBtn onClick={() => sendSpecialKey('lock')} title="Lock remote screen">
+            <Lock size={14} />
+          </ToolBtn>
+          <ToolBtn onClick={() => sendSpecialKey('task_mgr')} title="Task Manager / Activity Monitor">
+            <Activity size={14} />
+          </ToolBtn>
+          <ToolBtn
+            onClick={() => {
+              const dc = dcRef.current
+              if (dc?.readyState === 'open') dc.send(JSON.stringify({ type: 'screenshot' }))
+            }}
+            title="Capture remote screenshot"
+          >
+            <Camera size={14} />
           </ToolBtn>
 
           <ToolBtn onClick={() => setChatOpen((v) => !v)} title="Chat" active={chatOpen}>
