@@ -196,9 +196,9 @@ export default function RemoteDisplay({ framesChannel, dataChannel, remoteScreen
     }
   }, [framesChannel])
 
-  // Reset hasFrames when channel changes
+  // Reset frame state when channel drops (avoids stale frozen/loading overlays on reconnect)
   useEffect(() => {
-    if (!framesChannel) setHasFrames(false)
+    if (!framesChannel) { setHasFrames(false); setFrozen(false) }
   }, [framesChannel])
 
   function toRemote(e: React.MouseEvent): { x: number; y: number } {

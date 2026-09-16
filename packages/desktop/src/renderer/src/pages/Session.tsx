@@ -878,10 +878,11 @@ export default function Session({ peerId, role, onEnd }: Props) {
   }
 
   async function reconnect() {
-    diag('reconnecting…')
+    setDiagLines((prev) => [...prev, '─────── reconnecting ───────'])
     cleanup(true) // keep duration counter running
     pendingTransfersRef.current.clear()
     setMicActive(false)
+    setFileTransfers([])
     setConnState('connecting')
     setInitError('')
     await new Promise((r) => setTimeout(r, 600))

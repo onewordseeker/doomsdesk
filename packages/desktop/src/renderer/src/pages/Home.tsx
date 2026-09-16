@@ -58,6 +58,7 @@ export default function Home() {
   const [webUrl, setWebUrl] = useState('https://doomsdesk.hamidentifier.cloud')
   const [perms, setPerms] = useState<{ accessibility: boolean; screenRecording: boolean } | null>(null)
   const pollRef = useRef<ReturnType<typeof setInterval>>()
+  const connectTimerRef = useRef<ReturnType<typeof setTimeout>>()
 
   // Refs so the stale signaling-message closure can read current form values
   const connectIdRef = useRef(connectId)
@@ -76,6 +77,7 @@ export default function Home() {
       (e) => {
         const msg = e.payload
         if (msg.type === 'connect_result') {
+          clearTimeout(connectTimerRef.current)
           if (!msg.approved) {
             setConnecting(false)
             setConnectError(msg.reason ?? 'Connection refused')
@@ -157,7 +159,12 @@ export default function Home() {
       ? `${digits.slice(0, 3)}-${digits.slice(3, 6)}-${digits.slice(6, 9)}`
       : digits
     await invoke('connect_to_peer', { targetId: cleanId, password: pw })
-    setTimeout(() => setConnecting(false), 8000)
+    // If no connect_result arrives within 8s, show an error
+    clearTimeout(connectTimerRef.current)
+    connectTimerRef.current = setTimeout(() => {
+      setConnecting(false)
+      setConnectError('Remote device did not respond — check the ID and try again')
+    }, 8000)
   }
 
   function connectRecent(device: RecentDevice) {
@@ -213,8 +220,8 @@ export default function Home() {
         </div>
       </div>
 
-      {/* macOS permission warnings */}
-      {perms && (!perms.accessibility || !perms.screenRecording) && (
+      {/* macOS permission warnings — only relevant when receiving help */}
+      {perms && (!perms.accessibility || !perms.screenRecording) && activeTab === 'receive' && (
         <div className="px-4 py-2 bg-amber-900/30 border-b border-amber-500/20 text-xs text-amber-300 flex items-center gap-3">
           <AlertTriangle size={13} className="shrink-0 text-amber-400" />
           <span className="flex-1">
@@ -366,6 +373,7 @@ export default function Home() {
                           ? `${digits.slice(0, 3)}-${digits.slice(3)}`
                           : digits
                         setConnectId(formatted)
+                        if (connectError) setConnectError('')
                       }}
                       onKeyDown={(e) => e.key === 'Enter' && handleConnect()}
                       placeholder="123-456-789"
