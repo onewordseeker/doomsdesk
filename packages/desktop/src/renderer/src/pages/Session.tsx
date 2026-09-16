@@ -984,13 +984,14 @@ export default function Session({ peerId, role, onEnd }: Props) {
     return (
       <div className="flex flex-col h-screen bg-bg border border-surface-border select-none">
         <div className="flex items-center justify-between px-4 flex-1">
-          <div className="flex items-center gap-3 min-w-0">
+          {/* drag-region: lets user move the floating banner */}
+          <div className="flex items-center gap-3 min-w-0 cursor-move" data-tauri-drag-region>
             <div className={`w-2 h-2 rounded-full shrink-0 ${connState === 'connected' ? 'bg-red-500 animate-pulse' : 'bg-slate-500'}`} />
-            <div className="min-w-0">
-              <p className="text-xs font-semibold text-white leading-tight">Being controlled</p>
-              <p className="text-xs text-slate-500 font-mono leading-tight truncate">{peerId}</p>
+            <div className="min-w-0" data-tauri-drag-region>
+              <p className="text-xs font-semibold text-white leading-tight" data-tauri-drag-region>Being controlled</p>
+              <p className="text-xs text-slate-500 font-mono leading-tight truncate" data-tauri-drag-region>{peerId}</p>
             </div>
-            <span className="text-xs text-slate-600 font-mono shrink-0">{formatDuration(sessionDuration)}</span>
+            <span className="text-xs text-slate-600 font-mono shrink-0" data-tauri-drag-region>{formatDuration(sessionDuration)}</span>
           </div>
           <div className="flex items-center gap-2 shrink-0">
             {/* Chat toggle with unread badge */}

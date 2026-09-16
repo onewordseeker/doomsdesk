@@ -249,6 +249,15 @@ pub fn create_agent_window(app: &AppHandle, peer_id: &str) {
                     let _ = win.set_position(tauri::PhysicalPosition::new(x, y));
                 }
             }
+            // Safety net: restore main window if agent banner is closed unexpectedly
+            let app_clone = app.clone();
+            win.on_window_event(move |event| {
+                if matches!(event, tauri::WindowEvent::Destroyed) {
+                    if let Some(main) = app_clone.get_webview_window("main") {
+                        let _ = main.show();
+                    }
+                }
+            });
         }
         Err(e) => eprintln!("[signaling] agent window error: {}", e),
     }
