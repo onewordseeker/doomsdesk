@@ -84,6 +84,7 @@ export default function Session({ peerId, role, onEnd }: Props) {
   const [peerRtt, setPeerRtt] = useState<number | null>(null)
   const [showActionsMenu, setShowActionsMenu] = useState(false)
   const [qualityPreset, setQualityPreset] = useState<'auto' | 'lan' | 'wan' | 'low'>('auto')
+  const [dragOver, setDragOver] = useState(false)
   const [remoteAudioEl] = useState(() => {
     const el = document.createElement('audio')
     el.autoplay = true
@@ -1166,16 +1167,48 @@ export default function Session({ peerId, role, onEnd }: Props) {
         </div>
       )}
 
-      <RemoteDisplay
-        framesChannel={framesChannel}
-        dataChannel={dataChannel}
-        remoteScreenSize={remoteScreenSize}
-        zoom={zoom}
-        stretch={stretch}
-        connState={connState}
-        recording={recording}
-        onRecordingChunk={handleRecordingDone}
-      />
+      {/* Disconnected/reconnecting overlay */}
+      {connState === 'disconnected' && (
+        <div className="absolute inset-0 flex items-center justify-center z-10 pointer-events-none">
+          <div className="flex items-center gap-2 bg-black/70 border border-yellow-500/30 rounded-lg px-4 py-2">
+            <div className="w-2 h-2 rounded-full bg-yellow-500 animate-pulse" />
+            <span className="text-yellow-400 text-xs font-medium">Reconnecting…</span>
+          </div>
+        </div>
+      )}
+
+      {/* Drag-and-drop overlay */}
+      {dragOver && (
+        <div className="absolute inset-0 z-10 flex items-center justify-center bg-brand/10 border-2 border-brand/50 border-dashed pointer-events-none rounded-sm">
+          <div className="flex flex-col items-center gap-2">
+            <Upload size={32} className="text-brand" />
+            <span className="text-brand text-sm font-medium">Drop to send file</span>
+          </div>
+        </div>
+      )}
+
+      <div
+        className="flex flex-col flex-1 min-h-0 relative"
+        onDragOver={(e) => { e.preventDefault(); setDragOver(true) }}
+        onDragLeave={(e) => { if (!e.currentTarget.contains(e.relatedTarget as Node)) setDragOver(false) }}
+        onDrop={(e) => {
+          e.preventDefault()
+          setDragOver(false)
+          const files = Array.from(e.dataTransfer.files)
+          files.forEach((f) => sendFile(f))
+        }}
+      >
+        <RemoteDisplay
+          framesChannel={framesChannel}
+          dataChannel={dataChannel}
+          remoteScreenSize={remoteScreenSize}
+          zoom={zoom}
+          stretch={stretch}
+          connState={connState}
+          recording={recording}
+          onRecordingChunk={handleRecordingDone}
+        />
+      </div>
     </div>
   )
 }
