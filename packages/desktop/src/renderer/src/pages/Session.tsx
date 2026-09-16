@@ -775,6 +775,29 @@ export default function Session({ peerId, role, onEnd }: Props) {
     }
   }, [fullscreen])
 
+  // Paste handler: if clipboard contains an image, send it as a file
+  useEffect(() => {
+    if (role !== 'controller') return
+    const onPaste = (e: ClipboardEvent) => {
+      const items = e.clipboardData?.items
+      if (!items) return
+      for (const item of Array.from(items)) {
+        if (item.type.startsWith('image/')) {
+          const file = item.getAsFile()
+          if (file) {
+            const ts = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19)
+            const ext = item.type.split('/')[1] ?? 'png'
+            const namedFile = new File([file], `paste-${ts}.${ext}`, { type: item.type })
+            sendFile(namedFile)
+          }
+          break
+        }
+      }
+    }
+    window.addEventListener('paste', onPaste)
+    return () => window.removeEventListener('paste', onPaste)
+  }, [role])
+
   // F11 toggles fullscreen; Ctrl+= zoom in; Ctrl+- zoom out; Ctrl+0 reset zoom
   // Click outside closes actions menu
   useEffect(() => {
@@ -1115,12 +1138,18 @@ export default function Session({ peerId, role, onEnd }: Props) {
       {(initError || connState === 'failed') && (
         <div className="absolute inset-0 flex items-center justify-center bg-black/80 z-10">
           <div className="text-center max-w-sm px-6">
-            <p className="text-red-400 text-sm font-medium mb-1">
+            <p className="text-red-400 text-sm font-medium mb-2">
               {connState === 'failed' ? 'Connection failed' : 'Session failed to start'}
             </p>
-            <p className="text-slate-400 text-xs font-mono">
+            <p className="text-slate-400 text-xs font-mono mb-5">
               {initError || 'ICE negotiation failed — the devices could not reach each other'}
             </p>
+            <button
+              onClick={handleEnd}
+              className="px-5 py-2 bg-surface border border-surface-border text-slate-300 text-sm rounded-lg hover:border-slate-500 transition-colors"
+            >
+              ← Back to Home
+            </button>
           </div>
         </div>
       )}
