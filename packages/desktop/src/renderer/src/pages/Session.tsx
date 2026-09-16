@@ -340,13 +340,19 @@ export default function Session({ peerId, role, onEnd }: Props) {
     inputDc.onopen = async () => {
       diag('input DC open — starting input worker')
       invoke('start_input_worker').catch(() => {})
-      inputDc.send(
-        JSON.stringify({ type: 'screen_info', width: window.screen.width, height: window.screen.height })
-      )
       try {
         const monitors = await invoke<MonitorInfo[]>('list_monitors')
+        // Use physical pixel dimensions of the primary (or first) monitor
+        const primary = monitors.find((m) => m.isMain) ?? monitors[0]
+        const capW = primary ? Math.min(primary.width, 1920) : window.screen.width
+        const capH = primary ? Math.round(primary.height * (capW / primary.width)) : window.screen.height
+        inputDc.send(JSON.stringify({ type: 'screen_info', width: capW, height: capH }))
         inputDc.send(JSON.stringify({ type: 'monitor_list', monitors }))
-      } catch {}
+      } catch {
+        inputDc.send(
+          JSON.stringify({ type: 'screen_info', width: window.screen.width, height: window.screen.height })
+        )
+      }
     }
 
     framesDc.onopen = () => diag('frames DC open')
@@ -401,14 +407,22 @@ export default function Session({ peerId, role, onEnd }: Props) {
     await connectFrameWs()
 
     let lastW = window.screen.width, lastH = window.screen.height
-    screenCheckRef.current = setInterval(() => {
+    screenCheckRef.current = setInterval(async () => {
       const w = window.screen.width, h = window.screen.height
       if (w !== lastW || h !== lastH) {
         lastW = w; lastH = h
         doRestartCapture(`display changed: ${w}x${h}`)
         const d = dcRef.current
         if (d?.readyState === 'open') {
-          d.send(JSON.stringify({ type: 'screen_info', width: w, height: h }))
+          try {
+            const monitors = await invoke<MonitorInfo[]>('list_monitors')
+            const primary = monitors.find((m) => m.isMain) ?? monitors[0]
+            const capW = primary ? Math.min(primary.width, 1920) : w
+            const capH = primary ? Math.round(primary.height * (capW / primary.width)) : h
+            d.send(JSON.stringify({ type: 'screen_info', width: capW, height: capH }))
+          } catch {
+            d.send(JSON.stringify({ type: 'screen_info', width: w, height: h }))
+          }
         }
       }
     }, 2000)
@@ -678,6 +692,16 @@ export default function Session({ peerId, role, onEnd }: Props) {
       setToolbarHidden(false)
     }
   }, [fullscreen])
+
+  // F11 toggles fullscreen
+  useEffect(() => {
+    if (role !== 'controller') return
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'F11') { e.preventDefault(); toggleFullscreen() }
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [role, toggleFullscreen])
 
   function sendDisplayResolution(preset: DisplayPreset) {
     setDisplayPreset(preset)
