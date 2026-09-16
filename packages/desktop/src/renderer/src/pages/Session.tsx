@@ -905,6 +905,8 @@ export default function Session({ peerId, role, onEnd }: Props) {
     invoke('send_signaling', { msg: { type: 'disconnect', targetId: peerId } })
     invoke('close_session')
     invoke('update_tray_tooltip', { tooltip: 'DoomsDesk' }).catch(() => {})
+    // Exit fullscreen before returning to Home so it doesn't stay stuck
+    if (fullscreen) getCurrentWindow().setFullscreen(false).catch(() => {})
     cleanup()
     onEnd()
   }
@@ -1458,7 +1460,8 @@ export default function Session({ peerId, role, onEnd }: Props) {
                 <p className="text-xs font-semibold text-slate-300 mb-2">Keyboard Shortcuts</p>
                 <div className="space-y-1 text-xs text-slate-400 font-mono">
                   {[
-                    ['F11 / Esc', 'Toggle fullscreen'],
+                    ['F11', 'Toggle fullscreen'],
+                    ['Esc', 'Exit fullscreen / close menus'],
                     ['Ctrl/⌘ +', 'Zoom in'],
                     ['Ctrl/⌘ -', 'Zoom out'],
                     ['Ctrl/⌘ 0', 'Reset zoom'],
@@ -1466,7 +1469,6 @@ export default function Session({ peerId, role, onEnd }: Props) {
                     ['Ctrl/⌘ ⇧ R', 'Toggle recording'],
                     ['Ctrl/⌘ /', 'Toggle key pass-through'],
                     ['Ctrl/⌘ ⇧ V', 'Pull remote clipboard'],
-                    ['Esc', 'Exit pointer lock / menus'],
                   ].map(([key, desc]) => (
                     <div key={key} className="flex justify-between gap-3">
                       <span className="bg-black/40 px-1.5 rounded shrink-0">{key}</span>
