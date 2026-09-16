@@ -11,9 +11,10 @@ interface Props {
   onRecordingChunk?: (blob: Blob) => void
   pointerLockEnabled?: boolean
   keyPassthrough?: boolean
+  onLocalZoom?: (delta: number) => void
 }
 
-export default function RemoteDisplay({ framesChannel, dataChannel, remoteScreenSize, zoom, stretch, connState, recording, onRecordingChunk, pointerLockEnabled = false, keyPassthrough = true }: Props) {
+export default function RemoteDisplay({ framesChannel, dataChannel, remoteScreenSize, zoom, stretch, connState, recording, onRecordingChunk, pointerLockEnabled = false, keyPassthrough = true, onLocalZoom }: Props) {
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const containerRef = useRef<HTMLDivElement>(null)
   const dcRef = useRef(dataChannel)
@@ -309,6 +310,11 @@ export default function RemoteDisplay({ framesChannel, dataChannel, remoteScreen
 
   const onWheel = useCallback((e: React.WheelEvent) => {
     e.preventDefault()
+    // Ctrl/Cmd + scroll → local zoom (trackpad pinch, or Ctrl+scroll)
+    if (e.ctrlKey || e.metaKey) {
+      onLocalZoom?.(e.deltaY < 0 ? 0.1 : -0.1)
+      return
+    }
     let dy = e.deltaY
     let dx = e.deltaX
     if (e.deltaMode === 0) {
@@ -326,7 +332,7 @@ export default function RemoteDisplay({ framesChannel, dataChannel, remoteScreen
       if (lines === 0 && xlines === 0) return
     }
     sendInput({ type: 'wheel', deltaX: dx, deltaY: dy })
-  }, [dataChannel])
+  }, [dataChannel, onLocalZoom])
 
   const onDblClick = useCallback((e: React.MouseEvent) => {
     e.preventDefault()

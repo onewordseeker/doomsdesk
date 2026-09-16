@@ -1563,6 +1563,7 @@ export default function Session({ peerId, role, onEnd }: Props) {
           onRecordingChunk={handleRecordingDone}
           pointerLockEnabled={pointerLockEnabled}
           keyPassthrough={keyPassthrough}
+          onLocalZoom={(delta) => setZoom((z) => Math.min(3, Math.max(0.5, Math.round((z + delta) * 10) / 10)))}
         />
       </div>
     </div>
