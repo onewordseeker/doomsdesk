@@ -288,6 +288,13 @@ mod platform {
                 "send_keys" => {
                     let combo = ev["combo"].as_str().unwrap_or("");
                     match combo {
+                        "spotlight_or_start" => {
+                            // macOS: Cmd+Space (Spotlight)
+                            post_key(VK_META, true, 0);
+                            post_key(49, true, F_CMD);   // 49 = Space
+                            post_key(49, false, F_CMD);
+                            post_key(VK_META, false, 0);
+                        }
                         "lock" => {
                             let _ = std::process::Command::new(
                                 "/System/Library/CoreServices/Menu Extras/User.menu/Contents/Resources/CGSession"
@@ -495,6 +502,11 @@ mod platform {
                 "send_keys" => {
                     let combo = ev["combo"].as_str().unwrap_or("");
                     match combo {
+                        "spotlight_or_start" => {
+                            // Windows: Win key opens Start menu
+                            keybd_event(0x5B, 0, 0, 0);       // Win ↓
+                            keybd_event(0x5B, 0, KEYUP, 0);   // Win ↑
+                        }
                         "lock" => { LockWorkStation(); }
                         "task_mgr" | "ctrl_shift_esc" => {
                             // Ctrl+Shift+Esc opens Task Manager

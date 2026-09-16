@@ -93,6 +93,7 @@ export default function Session({ peerId, role, onEnd }: Props) {
   const [micActive, setMicActive] = useState(false)
   const [recording, setRecording] = useState(false)
   const [peerRtt, setPeerRtt] = useState<number | null>(null)
+  const [iceType, setIceType] = useState<'host' | 'srflx' | 'relay' | null>(null)
   const [showActionsMenu, setShowActionsMenu] = useState(false)
   const [qualityPreset, setQualityPreset] = useState<'auto' | 'lan' | 'wan' | 'low'>('auto')
   const [dragOver, setDragOver] = useState(false)
@@ -114,6 +115,30 @@ export default function Session({ peerId, role, onEnd }: Props) {
     const t = setTimeout(() => setFileTransfers((prev) => prev.filter((ft) => !ft.done)), 8000)
     return () => clearTimeout(t)
   }, [doneFtIds])
+
+  // Poll WebRTC stats for ICE candidate type every 5s
+  useEffect(() => {
+    if (connState !== 'connected') { setIceType(null); return }
+    const poll = async () => {
+      const pc = pcRef.current
+      if (!pc) return
+      try {
+        const stats = await pc.getStats()
+        for (const s of stats.values()) {
+          if (s.type === 'candidate-pair' && (s as any).state === 'succeeded' && (s as any).nominated) {
+            const local = stats.get((s as any).localCandidateId) as any
+            if (local) {
+              setIceType(local.candidateType === 'relay' ? 'relay' : local.candidateType === 'srflx' ? 'srflx' : 'host')
+            }
+            break
+          }
+        }
+      } catch {}
+    }
+    poll()
+    const id = setInterval(poll, 5000)
+    return () => clearInterval(id)
+  }, [connState])
 
   // Auto-scroll diagnostics and chat to bottom on new content
   useEffect(() => {
@@ -893,6 +918,10 @@ export default function Session({ peerId, role, onEnd }: Props) {
         e.preventDefault(); setRecording((v) => !v)
       } else if ((e.ctrlKey || e.metaKey) && e.key === '/') {
         e.preventDefault(); setKeyPassthrough((v) => !v)
+      } else if ((e.ctrlKey || e.metaKey) && e.shiftKey && (e.key === 'v' || e.key === 'V')) {
+        e.preventDefault()
+        const dc = dcRef.current
+        if (dc?.readyState === 'open') dc.send(JSON.stringify({ type: 'request_clipboard' }))
       } else if ((e.ctrlKey || e.metaKey) && (e.key === '=' || e.key === '+')) {
         e.preventDefault(); setZoom((z) => Math.min(3, z + 0.25))
       } else if ((e.ctrlKey || e.metaKey) && e.key === '-') {
@@ -1060,6 +1089,18 @@ export default function Session({ peerId, role, onEnd }: Props) {
               {peerRtt !== null && ` · ${peerRtt}ms`}
             </span>
           )}
+          {iceType && (
+            <span
+              className={`text-xs px-1.5 py-0.5 rounded font-mono ${
+                iceType === 'host' ? 'bg-emerald-900/40 text-emerald-400' :
+                iceType === 'srflx' ? 'bg-sky-900/40 text-sky-400' :
+                'bg-amber-900/40 text-amber-400'
+              }`}
+              title={iceType === 'host' ? 'Direct LAN connection' : iceType === 'srflx' ? 'STUN / NAT traversal' : 'TURN relay (slower)'}
+            >
+              {iceType === 'host' ? 'LAN' : iceType === 'srflx' ? 'P2P' : 'TURN'}
+            </span>
+          )}
           <span className="text-xs px-1.5 py-0.5 rounded bg-surface text-slate-400">Controller</span>
         </div>
 
@@ -1203,6 +1244,12 @@ export default function Session({ peerId, role, onEnd }: Props) {
             {showActionsMenu && (
               <div className="absolute top-full right-0 mt-1 bg-surface border border-surface-border rounded-lg shadow-xl z-30 py-1 min-w-[160px]">
                 <button
+                  onClick={() => { sendSpecialKey('spotlight_or_start'); setShowActionsMenu(false) }}
+                  className="w-full flex items-center gap-2.5 px-3 py-1.5 text-xs text-slate-300 hover:bg-surface-elevated transition-colors"
+                >
+                  <Activity size={12} /> Search (Spotlight / Start)
+                </button>
+                <button
                   onClick={() => { sendSpecialKey('lock'); setShowActionsMenu(false) }}
                   className="w-full flex items-center gap-2.5 px-3 py-1.5 text-xs text-slate-300 hover:bg-surface-elevated transition-colors"
                 >
@@ -1295,6 +1342,7 @@ export default function Session({ peerId, role, onEnd }: Props) {
                     ['Ctrl/⌘ M', 'Toggle mic'],
                     ['Ctrl/⌘ ⇧ R', 'Toggle recording'],
                     ['Ctrl/⌘ /', 'Toggle key pass-through'],
+                    ['Ctrl/⌘ ⇧ V', 'Pull remote clipboard'],
                     ['Esc', 'Exit pointer lock / menus'],
                   ].map(([key, desc]) => (
                     <div key={key} className="flex justify-between gap-3">
