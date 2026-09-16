@@ -586,6 +586,18 @@ export default function Session({ peerId, role, onEnd }: Props) {
     }, 2500)
     agentCleanups.push(() => clearInterval(clipSyncInterval))
 
+    // Check macOS permissions before starting capture
+    try {
+      const perms = await invoke<{ accessibility: boolean; screenRecording: boolean }>('check_macos_permissions')
+      if (!perms.screenRecording) {
+        diag('ERROR: Screen Recording permission denied — open System Settings')
+        invoke('open_privacy_settings', { pane: 'screenRecording' }).catch(() => {})
+      }
+      if (!perms.accessibility) {
+        diag('WARNING: Accessibility permission denied — input injection will fail')
+      }
+    } catch {}
+
     const errUnsub = await listen<string>('screen-frame-error', () => {
       framesSkipped++
       consecutiveErrors++
