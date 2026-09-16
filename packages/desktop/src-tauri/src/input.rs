@@ -225,13 +225,6 @@ mod platform {
                     _         => post_mouse(LU, x, y, BL),
                 },
 
-                "dblclick" => {
-                    // Two rapid left clicks
-                    post_mouse(LD, x, y, BL); post_mouse(LU, x, y, BL);
-                    std::thread::sleep(std::time::Duration::from_millis(30));
-                    post_mouse(LD, x, y, BL); post_mouse(LU, x, y, BL);
-                }
-
                 "wheel" => {
                     let dy = ev["deltaY"].as_f64().unwrap_or(0.0);
                     let dx = ev["deltaX"].as_f64().unwrap_or(0.0);
@@ -418,7 +411,7 @@ mod platform {
             "End" => 0x23, "Home" => 0x24,
             "ArrowLeft" => 0x25, "ArrowUp" => 0x26,
             "ArrowRight" => 0x27, "ArrowDown" => 0x28,
-            "Delete" => 0x2E, "Meta" => 0x5B,
+            "Insert" => 0x2D, "Delete" => 0x2E, "Meta" => 0x5B,
             "F1"  => 0x70, "F2"  => 0x71, "F3"  => 0x72, "F4"  => 0x73,
             "F5"  => 0x74, "F6"  => 0x75, "F7"  => 0x76, "F8"  => 0x77,
             "F9"  => 0x78, "F10" => 0x79, "F11" => 0x7A, "F12" => 0x7B,
@@ -487,13 +480,6 @@ mod platform {
                     _         => mouse_event(LEFTUP,   0, 0, 0, 0),
                 },
 
-                "dblclick" => {
-                    SetCursorPos(x, y);
-                    mouse_event(LEFTDOWN, 0, 0, 0, 0); mouse_event(LEFTUP, 0, 0, 0, 0);
-                    std::thread::sleep(std::time::Duration::from_millis(30));
-                    mouse_event(LEFTDOWN, 0, 0, 0, 0); mouse_event(LEFTUP, 0, 0, 0, 0);
-                }
-
                 "wheel" => {
                     let dy = ev["deltaY"].as_f64().unwrap_or(0.0);
                     let dx = ev["deltaX"].as_f64().unwrap_or(0.0);
@@ -532,11 +518,19 @@ mod platform {
 
                 "clipboard" => {
                     if let Some(text) = ev["text"].as_str() {
-                        let escaped = text.replace('\'', "''");
-                        let _ = std::process::Command::new("powershell")
+                        // Pipe text via stdin to avoid PowerShell injection on any char
+                        let mut child = std::process::Command::new("powershell")
                             .args(["-NoProfile", "-NonInteractive", "-Command",
-                                   &format!("Set-Clipboard -Value '{}'", escaped)])
-                            .status();
+                                   "Set-Clipboard ([System.IO.StreamReader]::new([Console]::OpenStandardInput(),[System.Text.Encoding]::UTF8).ReadToEnd())"])
+                            .stdin(std::process::Stdio::piped())
+                            .spawn();
+                        if let Ok(ref mut c) = child {
+                            if let Some(mut stdin) = c.stdin.take() {
+                                use std::io::Write;
+                                let _ = stdin.write_all(text.as_bytes());
+                            }
+                            let _ = c.wait();
+                        }
                         keybd_event(0x11, 0, 0, 0); // Ctrl down
                         keybd_event(0x56, 0, 0, 0); // V down
                         keybd_event(0x56, 0, KEYUP, 0);

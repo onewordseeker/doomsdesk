@@ -336,12 +336,6 @@ export default function RemoteDisplay({ framesChannel, dataChannel, remoteScreen
     sendInput({ type: 'wheel', deltaX: dx, deltaY: dy })
   }, [dataChannel, onLocalZoom])
 
-  const onDblClick = useCallback((e: React.MouseEvent) => {
-    e.preventDefault()
-    const { x, y } = toRemote(e)
-    sendInput({ type: 'dblclick', x, y })
-  }, [dataChannel, remoteScreenSize, stretch])
-
   const onKeyDown = useCallback((e: React.KeyboardEvent) => {
     if (!keyPassthrough) return
     if (isComposingRef.current) return // let IME handle composition keys
@@ -422,7 +416,6 @@ export default function RemoteDisplay({ framesChannel, dataChannel, remoteScreen
         onMouseDown={onMouseDown}
         onMouseUp={onMouseUp}
         onMouseLeave={onMouseLeave}
-        onDoubleClick={onDblClick}
         onContextMenu={onContextMenu}
         onWheel={onWheel}
         className="cursor-crosshair select-none"
