@@ -304,6 +304,16 @@ mod platform {
                                 .args(["-a", "Force Quit Applications"])
                                 .spawn();
                         }
+                        "sleep" => {
+                            let _ = std::process::Command::new("pmset")
+                                .arg("sleepnow")
+                                .spawn();
+                        }
+                        "restart" => {
+                            let _ = std::process::Command::new("osascript")
+                                .args(["-e", "tell app \"System Events\" to restart"])
+                                .spawn();
+                        }
                         _ => {}
                     }
                 }
@@ -501,6 +511,16 @@ mod platform {
                             let _ = std::process::Command::new("powershell")
                                 .args(["-NoProfile", "-NonInteractive", "-Command",
                                        "(New-Object -comObject Shell.Application).WindowsSecurity()"])
+                                .spawn();
+                        }
+                        "sleep" => {
+                            let _ = std::process::Command::new("rundll32.exe")
+                                .args(["powrprof.dll,SetSuspendState", "0,1,0"])
+                                .spawn();
+                        }
+                        "restart" => {
+                            let _ = std::process::Command::new("shutdown")
+                                .args(["/r", "/t", "10"])
                                 .spawn();
                         }
                         _ => {}

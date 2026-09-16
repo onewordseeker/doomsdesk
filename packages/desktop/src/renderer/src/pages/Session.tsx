@@ -6,7 +6,7 @@ import RemoteDisplay from '../components/RemoteDisplay'
 import {
   Maximize2, Minimize2, ZoomIn, ZoomOut, Expand, Shrink,
   Clipboard, X, Monitor, MessageSquare, Send, Tv2,
-  Upload, Download, Mic, MicOff, Lock, Activity, Camera, Circle, Gauge, Crosshair, HelpCircle
+  Upload, Download, Mic, MicOff, Lock, Activity, Camera, Circle, Gauge, Crosshair, HelpCircle, Moon, Power
 } from 'lucide-react'
 
 interface Props {
@@ -99,6 +99,7 @@ export default function Session({ peerId, role, onEnd }: Props) {
   const [pointerLockEnabled, setPointerLockEnabled] = useState(false)
   const [showShortcuts, setShowShortcuts] = useState(false)
   const [toast, setToast] = useState<string | null>(null)
+  const [unreadChat, setUnreadChat] = useState(0)
   const [remoteAudioEl] = useState(() => {
     const el = document.createElement('audio')
     el.autoplay = true
@@ -113,12 +114,16 @@ export default function Session({ peerId, role, onEnd }: Props) {
     return () => clearTimeout(t)
   }, [doneFtIds])
 
-  // Auto-scroll diagnostics to bottom when new lines arrive
+  // Auto-scroll diagnostics and chat to bottom on new content
   useEffect(() => {
     diagEndRef.current?.scrollIntoView({ behavior: 'instant' })
   }, [diagLines])
+  useEffect(() => {
+    chatEndRef.current?.scrollIntoView({ behavior: 'smooth' })
+  }, [chatMessages])
 
   const diagEndRef = useRef<HTMLDivElement>(null)
+  const chatEndRef = useRef<HTMLDivElement>(null)
   const pcRef = useRef<RTCPeerConnection | null>(null)
   const dcRef = useRef<RTCDataChannel | null>(null)
   const fileDcRef = useRef<RTCDataChannel | null>(null)
@@ -425,7 +430,13 @@ export default function Session({ peerId, role, onEnd }: Props) {
         } else if (msg.type === 'ping') {
           if (inputDc.readyState === 'open') inputDc.send(JSON.stringify({ type: 'pong', t: msg.t }))
         } else if (msg.type === 'chat') {
-          diag(`[chat] ${msg.text ?? ''}`)
+          const text = msg.text ?? ''
+          diag(`[chat] ${text}`)
+          setChatMessages((prev) => [...prev, { from: 'them', text, ts: Date.now() }])
+          setChatOpen((open) => {
+            if (!open) setUnreadChat((n) => n + 1)
+            return open
+          })
         } else {
           invoke('inject_input', { event: msg })
         }
@@ -575,8 +586,16 @@ export default function Session({ peerId, role, onEnd }: Props) {
             } else if (msg.type === 'pong') {
               if (msg.t) setPeerRtt(Date.now() - msg.t)
             } else if (msg.type === 'chat') {
-              setChatMessages((prev) => [...prev, { from: 'them', text: msg.text ?? '', ts: Date.now() }])
-              setChatOpen(true)
+              const text = msg.text ?? ''
+              setChatMessages((prev) => [...prev, { from: 'them', text, ts: Date.now() }])
+              setChatOpen((open) => {
+                if (!open) {
+                  setUnreadChat((n) => n + 1)
+                  setToast(`📨 ${text.slice(0, 60)}${text.length > 60 ? '…' : ''}`)
+                  setTimeout(() => setToast(null), 3500)
+                }
+                return open
+              })
             }
           } catch {}
         }
@@ -834,6 +853,9 @@ export default function Session({ peerId, role, onEnd }: Props) {
   useEffect(() => {
     if (role !== 'controller') return
     const onPaste = (e: ClipboardEvent) => {
+      // Don't intercept paste in text inputs / textareas (chat box, etc.)
+      const tag = (e.target as HTMLElement)?.tagName
+      if (tag === 'INPUT' || tag === 'TEXTAREA') return
       const items = e.clipboardData?.items
       if (!items) return
       for (const item of Array.from(items)) {
@@ -861,7 +883,9 @@ export default function Session({ peerId, role, onEnd }: Props) {
       if (e.key === 'F11') { e.preventDefault(); toggleFullscreen() }
       else if (e.key === 'Escape') { setShowActionsMenu(false); setShowShortcuts(false) }
       else if ((e.ctrlKey || e.metaKey) && e.key === 'm') { e.preventDefault(); toggleMic() }
-      else if ((e.ctrlKey || e.metaKey) && (e.key === '=' || e.key === '+')) {
+      else if ((e.ctrlKey || e.metaKey) && e.shiftKey && (e.key === 'r' || e.key === 'R')) {
+        e.preventDefault(); setRecording((v) => !v)
+      } else if ((e.ctrlKey || e.metaKey) && (e.key === '=' || e.key === '+')) {
         e.preventDefault(); setZoom((z) => Math.min(3, z + 0.25))
       } else if ((e.ctrlKey || e.metaKey) && e.key === '-') {
         e.preventDefault(); setZoom((z) => Math.max(0.5, z - 0.25))
@@ -915,20 +939,74 @@ export default function Session({ peerId, role, onEnd }: Props) {
 
   if (role === 'agent') {
     return (
-      <div className="flex items-center justify-between h-screen px-4 bg-bg border border-surface-border select-none">
-        <div className="flex items-center gap-3">
-          <div className="w-2 h-2 rounded-full bg-red-500 animate-pulse shrink-0" />
-          <div className="min-w-0">
-            <p className="text-xs font-semibold text-white leading-tight">Being controlled</p>
-            <p className="text-xs text-slate-500 font-mono leading-tight truncate">{peerId}</p>
+      <div className="flex flex-col h-screen bg-bg border border-surface-border select-none">
+        <div className="flex items-center justify-between px-4 flex-1">
+          <div className="flex items-center gap-3 min-w-0">
+            <div className={`w-2 h-2 rounded-full shrink-0 ${connState === 'connected' ? 'bg-red-500 animate-pulse' : 'bg-slate-500'}`} />
+            <div className="min-w-0">
+              <p className="text-xs font-semibold text-white leading-tight">Being controlled</p>
+              <p className="text-xs text-slate-500 font-mono leading-tight truncate">{peerId}</p>
+            </div>
+            <span className="text-xs text-slate-600 font-mono shrink-0">{formatDuration(sessionDuration)}</span>
+          </div>
+          <div className="flex items-center gap-2 shrink-0">
+            {/* Chat toggle with unread badge */}
+            <div className="relative">
+              <button
+                onClick={() => { setChatOpen((v) => !v); setUnreadChat(0) }}
+                className={`p-1.5 rounded-lg transition-colors ${chatOpen ? 'bg-brand/20 text-brand' : 'text-slate-400 hover:text-white hover:bg-surface'}`}
+                title="Chat with controller"
+              >
+                <MessageSquare size={13} />
+              </button>
+              {unreadChat > 0 && !chatOpen && (
+                <span className="absolute -top-1 -right-1 w-4 h-4 bg-brand text-white text-[9px] font-bold rounded-full flex items-center justify-center pointer-events-none leading-none">
+                  {unreadChat > 9 ? '9+' : unreadChat}
+                </span>
+              )}
+            </div>
+            <button
+              onClick={handleEnd}
+              className="shrink-0 px-3 py-1.5 text-xs font-medium text-red-400 border border-red-500/30 rounded-lg hover:bg-red-500/10 transition-colors"
+            >
+              End
+            </button>
           </div>
         </div>
-        <button
-          onClick={handleEnd}
-          className="ml-3 shrink-0 px-3 py-1.5 text-xs font-medium text-red-400 border border-red-500/30 rounded-lg hover:bg-red-500/10 transition-colors"
-        >
-          End
-        </button>
+        {/* Agent inline chat */}
+        {chatOpen && (
+          <div className="border-t border-surface-border flex flex-col" style={{ height: 180 }}>
+            <div className="flex-1 overflow-y-auto p-2 space-y-1 font-mono text-xs">
+              {chatMessages.length === 0 ? (
+                <span className="text-slate-600">No messages yet…</span>
+              ) : (
+                chatMessages.map((m, i) => (
+                  <div key={i} className={`flex flex-col ${m.from === 'me' ? 'items-end' : 'items-start'}`}>
+                    <span className={`px-2 py-1 rounded-lg max-w-[95%] break-words ${m.from === 'me' ? 'bg-brand/20 text-brand' : 'bg-surface text-slate-300'}`}>
+                      {m.text}
+                    </span>
+                    <span className="text-slate-700 text-[10px] mt-0.5 px-1">
+                      {new Date(m.ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                    </span>
+                  </div>
+                ))
+              )}
+              <div ref={chatEndRef} />
+            </div>
+            <div className="flex items-center gap-1 p-1.5 border-t border-slate-700 shrink-0">
+              <input
+                className="flex-1 bg-surface text-slate-200 text-xs rounded px-2 py-1 outline-none border border-transparent focus:border-brand/50"
+                placeholder="Reply…"
+                value={chatInput}
+                onChange={(e) => setChatInput(e.target.value)}
+                onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); sendChat(chatInput) } }}
+              />
+              <button onClick={() => sendChat(chatInput)} className="p-1.5 text-slate-400 hover:text-brand">
+                <Send size={12} />
+              </button>
+            </div>
+          </div>
+        )}
       </div>
     )
   }
@@ -1131,13 +1209,37 @@ export default function Session({ peerId, role, onEnd }: Props) {
                 >
                   <Camera size={12} /> Screenshot
                 </button>
+                <div className="border-t border-surface-border my-1" />
+                <button
+                  onClick={() => { sendSpecialKey('sleep'); setShowActionsMenu(false) }}
+                  className="w-full flex items-center gap-2.5 px-3 py-1.5 text-xs text-slate-300 hover:bg-surface-elevated transition-colors"
+                >
+                  <Moon size={12} /> Sleep
+                </button>
+                <button
+                  onClick={() => { sendSpecialKey('restart'); setShowActionsMenu(false) }}
+                  className="w-full flex items-center gap-2.5 px-3 py-1.5 text-xs text-amber-400/80 hover:bg-surface-elevated transition-colors"
+                >
+                  <Power size={12} /> Restart…
+                </button>
               </div>
             )}
           </div>
 
-          <ToolBtn onClick={() => setChatOpen((v) => !v)} title="Chat" active={chatOpen}>
-            <MessageSquare size={14} />
-          </ToolBtn>
+          <div className="relative">
+            <ToolBtn
+              onClick={() => { setChatOpen((v) => !v); setUnreadChat(0) }}
+              title="Chat"
+              active={chatOpen}
+            >
+              <MessageSquare size={14} />
+            </ToolBtn>
+            {unreadChat > 0 && !chatOpen && (
+              <span className="absolute -top-1 -right-1 w-4 h-4 bg-brand text-white text-[9px] font-bold rounded-full flex items-center justify-center pointer-events-none leading-none">
+                {unreadChat > 9 ? '9+' : unreadChat}
+              </span>
+            )}
+          </div>
 
           <div className="w-px h-4 bg-surface-border mx-1" />
 
@@ -1166,6 +1268,7 @@ export default function Session({ peerId, role, onEnd }: Props) {
                     ['Ctrl/⌘ -', 'Zoom out'],
                     ['Ctrl/⌘ 0', 'Reset zoom'],
                     ['Ctrl/⌘ M', 'Toggle mic'],
+                    ['Ctrl/⌘ ⇧ R', 'Toggle recording'],
                     ['Esc', 'Exit pointer lock / menus'],
                   ].map(([key, desc]) => (
                     <div key={key} className="flex justify-between gap-3">
@@ -1317,6 +1420,7 @@ export default function Session({ peerId, role, onEnd }: Props) {
                 </div>
               ))
             )}
+            <div ref={chatEndRef} />
           </div>
           <div className="flex items-center gap-1 p-1.5 border-t border-slate-700 shrink-0">
             <input
