@@ -100,10 +100,12 @@ export default function RemoteDisplay({ framesChannel, dataChannel, remoteScreen
     if (!ctx) return
 
     let lastFrameAt = 0
+    let lastDrawAt = 0
     let hasReceivedFrame = false
     let frameCount = 0
     let lastFpsLog = performance.now()
     let decodedMs = 0 // rolling avg decode time (recv→draw)
+    let lastKeyframeRequestAt = 0 // throttle keyframe requests
 
     // Codec strings:
     // H.264 High Profile Level 5.1 — accepts any H.264 High output from VideoToolbox AutoLevel
@@ -160,6 +162,7 @@ export default function RemoteDisplay({ framesChannel, dataChannel, remoteScreen
         const drawStart = performance.now()
         ctx.drawImage(f, 0, 0)
         f.close()
+        lastDrawAt = drawStart
         decodedMs = decodedMs * 0.9 + (performance.now() - drawStart) * 0.1
         frameCount++
         const now = performance.now()
@@ -240,8 +243,17 @@ export default function RemoteDisplay({ framesChannel, dataChannel, remoteScreen
       const isKey = isKeyFrame(data, activeCodec)
 
       if (decoder.state !== 'closed') {
-        // Drop non-keyframes when the decoder is backed up — never let the queue grow
-        if (!isKey && decoder.decodeQueueSize > 2) return
+        // Drop non-keyframes when the decoder is backed up — never let the queue grow.
+        // Also request a keyframe so the decoder can resync once the backlog clears.
+        if (!isKey && decoder.decodeQueueSize > 2) {
+          const now = performance.now()
+          if (now - lastKeyframeRequestAt > 500) {
+            lastKeyframeRequestAt = now
+            const dc = dcRef.current
+            if (dc?.readyState === 'open') dc.send(JSON.stringify({ type: 'request_keyframe' }))
+          }
+          return
+        }
         try {
           decoder.decode(new EncodedVideoChunk({
             type: isKey ? 'key' : 'delta',
@@ -256,16 +268,31 @@ export default function RemoteDisplay({ framesChannel, dataChannel, remoteScreen
 
     framesChannel.addEventListener('message', onMessage)
 
-    // Stall watchdog: if frames stop arriving for 8s, show overlay and request capture restart
+    // Stall watchdog — runs every 500 ms for fast recovery:
+    // 1. Draw stall: frames arriving but decoder not outputting (lost IDR sync) → request keyframe.
+    // 2. Frame stall: no frames at all for 5 s → restart capture pipeline.
     const stallId = setInterval(() => {
       if (!hasReceivedFrame) return
-      if (performance.now() - lastFrameAt > 5000) {
+      const now = performance.now()
+      const frameAge = now - lastFrameAt
+      const drawAge = lastDrawAt > 0 ? now - lastDrawAt : Infinity
+      // Decoder stuck: frames arriving (<1 s old) but nothing drawn for >2 s
+      if (frameAge < 1000 && drawAge > 2000) {
+        if (now - lastKeyframeRequestAt > 1000) {
+          lastKeyframeRequestAt = now
+          const dc = dcRef.current
+          if (dc?.readyState === 'open') dc.send(JSON.stringify({ type: 'request_keyframe' }))
+        }
+        return
+      }
+      // Frame stall: no frames arriving at all
+      if (frameAge > 5000) {
         setFrozen(true)
-        lastFrameAt = performance.now()
+        lastFrameAt = now
         const dc = dcRef.current
         if (dc?.readyState === 'open') dc.send(JSON.stringify({ type: 'restart_capture' }))
       }
-    }, 2000)
+    }, 500)
 
     return () => {
       cancelAnimationFrame(rafId)

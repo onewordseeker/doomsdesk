@@ -629,7 +629,7 @@ export default function Session({ peerId, role, onEnd }: Props) {
           diag(`bitrate ↓ ${(currentBps / 1_000_000).toFixed(1)} Mbps (skip=${Math.round(skipRate * 100)}% rtt=${rtt}ms)`)
         } else if (skipRate === 0 && !rttMarginal && !rttPoor) {
           stableWindows++
-          if (stableWindows >= 2 && currentBps < 50_000_000) {
+          if (stableWindows >= 1 && currentBps < 50_000_000) {
             currentBps = Math.min(50_000_000, Math.round(currentBps * 1.2))
             invoke('set_capture_bitrate', { bps: currentBps }).catch(() => {})
             stableWindows = 0
@@ -639,25 +639,9 @@ export default function Session({ peerId, role, onEnd }: Props) {
           stableWindows = 0
         }
 
-        // Dynamic FPS based on RTT
-        if (rtt > 0) {
-          let targetFps: number
-          if (rttPoor) {
-            targetFps = 15
-          } else if (rttMarginal) {
-            targetFps = 20
-          } else {
-            targetFps = 30
-          }
-          if (targetFps !== currentFps) {
-            currentFps = targetFps
-            invoke('set_capture_fps', { fps: targetFps }).catch(() => {})
-            // Inform controller so it can display current FPS cap
-            const d = dcRef.current
-            if (d?.readyState === 'open') d.send(JSON.stringify({ type: 'fps_changed', fps: targetFps }))
-            diag(`FPS → ${targetFps} (rtt=${rtt}ms)`)
-          }
-        } else if (rttGood && currentFps < 30) {
+        // Keep FPS at 30 always — RTT-based FPS throttle (old 15fps on high-RTT)
+        // made video unwatchably choppy. Bitrate adaptation handles congestion instead.
+        if (currentFps !== 30) {
           currentFps = 30
           invoke('set_capture_fps', { fps: 30 }).catch(() => {})
         }
