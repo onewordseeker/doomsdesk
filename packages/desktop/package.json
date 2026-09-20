@@ -1,6 +1,6 @@
 {
   "name": "@doomsdesk/desktop",
-  "version": "2.6.0",
+  "version": "2.7.0",
   "description": "DoomsDesk — Remote Desktop for Professionals",
   "scripts": {
     "dev": "tauri dev",

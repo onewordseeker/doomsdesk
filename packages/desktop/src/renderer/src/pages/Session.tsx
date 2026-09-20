@@ -881,6 +881,13 @@ export default function Session({ peerId, role, onEnd }: Props) {
     const pc = pcRef.current
     if (!pc) return
 
+    // Drop stray signaling from unexpected sources to prevent cross-session pollution
+    const sourceId = msg.sourceId as string | undefined
+    if (sourceId && sourceId !== peerId) {
+      diag(`ignoring ${msg.type} from ${sourceId} (peer is ${peerId})`)
+      return
+    }
+
     switch (msg.type) {
       case 'offer':
         // Both roles can receive offers: agent→controller (initial), controller→agent (ICE restart / mic renegotiation)
@@ -897,6 +904,10 @@ export default function Session({ peerId, role, onEnd }: Props) {
         break
       case 'answer':
         // Both roles can receive answers: agent→controller (initial reply), controller→agent (after ICE restart answer)
+        if (pc.signalingState !== 'have-local-offer') {
+          diag(`ignoring answer in state: ${pc.signalingState}`)
+          break
+        }
         diag('got answer → setRemoteDesc')
         try {
           await pc.setRemoteDescription({ type: 'answer', sdp: msg.sdp as string })
@@ -1462,18 +1473,29 @@ export default function Session({ peerId, role, onEnd }: Props) {
             <option value="h264">H.264</option>
             <option value="h265">H.265</option>
           </select>
-          {sessionStats?.codec && (
-            <span
-              className={`text-xs font-mono px-1.5 py-0.5 rounded select-none ${
-                sessionStats.codec === 'h265'
-                  ? 'bg-green-500/20 text-green-400'
-                  : 'bg-blue-500/20 text-blue-400'
-              }`}
-              title={`Codec in use: ${sessionStats.codec === 'h265' ? 'H.265 / HEVC' : 'H.264 / AVC'}`}
-            >
-              {sessionStats.codec === 'h265' ? 'H.265' : 'H.264'}
-            </span>
-          )}
+          {sessionStats?.codec && (() => {
+            const activeCodec = sessionStats.codec
+            const requested = codecPreset !== 'auto' ? codecPreset : null
+            const mismatch = requested && activeCodec !== requested
+            return (
+              <span
+                className={`text-xs font-mono px-1.5 py-0.5 rounded select-none ${
+                  mismatch
+                    ? 'bg-yellow-500/20 text-yellow-400'
+                    : activeCodec === 'h265'
+                      ? 'bg-green-500/20 text-green-400'
+                      : 'bg-blue-500/20 text-blue-400'
+                }`}
+                title={
+                  mismatch
+                    ? `Requested ${requested.toUpperCase()} but agent is using ${activeCodec.toUpperCase()} (not supported on this device)`
+                    : `Codec in use: ${activeCodec === 'h265' ? 'H.265 / HEVC' : 'H.264 / AVC'}`
+                }
+              >
+                {activeCodec === 'h265' ? 'H.265' : 'H.264'}{mismatch ? ' ⚠' : ''}
+              </span>
+            )
+          })()}
 
           <div className="w-px h-4 bg-surface-border mx-1" />
 

@@ -297,6 +297,17 @@ export class SignalingServer {
     agentDeviceId: string
   ): void {
     const agentState = this.state.get(agentWs)!;
+
+    // Reject if agent is already in an active session
+    if (agentState.sessionId) {
+      this.send(controllerWs, {
+        type: 'connect_result',
+        approved: false,
+        reason: 'Device is busy (already in a session)',
+      });
+      return;
+    }
+
     const sessionId = uuidv4();
 
     // Record in DB
