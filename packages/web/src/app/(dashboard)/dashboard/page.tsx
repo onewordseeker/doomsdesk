@@ -1,6 +1,7 @@
 'use client';
 
 import { useState, FormEvent } from 'react';
+import { useRouter } from 'next/navigation';
 import { Monitor, Activity, Calendar, Zap, ExternalLink, Clock, ArrowRight } from 'lucide-react';
 import { StatsCard } from '@/components/StatsCard';
 import { DeviceStatusBadge } from '@/components/DeviceStatusBadge';
@@ -34,12 +35,13 @@ function Skeleton({ className }: { className: string }) {
 export default function DashboardPage() {
   const { user } = useAuth();
   const { stats, loading } = useDashboard();
+  const router = useRouter();
   const [quickConnectId, setQuickConnectId] = useState('');
 
   function handleQuickConnect(e: FormEvent) {
     e.preventDefault();
     if (!quickConnectId.trim()) return;
-    window.location.href = `doomsdesk://connect?id=${quickConnectId.trim()}`;
+    router.push(`/viewer?id=${encodeURIComponent(quickConnectId.trim())}`);
   }
 
   const greeting = () => {
@@ -171,7 +173,7 @@ export default function DashboardPage() {
                     <td className="px-5 py-3.5 font-mono text-xs text-dark-text">{formatDuration(session.durationSeconds ?? 0)}</td>
                     <td className="px-5 py-3.5 text-dark-muted text-xs">{formatDate(session.startedAt)}</td>
                     <td className="px-5 py-3.5">
-                      <DeviceStatusBadge status="offline" showLabel={false} size="sm" />
+                      <DeviceStatusBadge status={session.endedAt === null ? 'online' : 'offline'} showLabel={false} size="sm" />
                     </td>
                   </tr>
                 ))}
