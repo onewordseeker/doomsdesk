@@ -1,9 +1,9 @@
 'use client';
 
 import { useState, useEffect, useRef, FormEvent } from 'react';
-import { User, Lock, Bell, Palette, Check, AlertCircle, Eye, EyeOff, ShieldCheck, ShieldOff, QrCode } from 'lucide-react';
+import { User, Lock, Bell, Palette, Check, AlertCircle, Eye, EyeOff, ShieldCheck, ShieldOff, QrCode, Pencil, X } from 'lucide-react';
 import { useSettings, useAuth, useToast } from '@/lib/hooks';
-import { updateSettings, changePassword, getTotpStatus, setupTotp, confirmTotp, disableTotp } from '@/lib/api';
+import { updateSettings, changePassword, getTotpStatus, setupTotp, confirmTotp, disableTotp, updateProfile } from '@/lib/api';
 import { useTheme } from 'next-themes';
 import clsx from 'clsx';
 import QRCode from 'qrcode';
@@ -65,6 +65,11 @@ export default function SettingsPage() {
   const [showNewPw, setShowNewPw] = useState(false);
   const [passwordSaving, setPasswordSaving] = useState(false);
   const [passwordError, setPasswordError] = useState('');
+
+  // Profile editing state
+  const [editingName, setEditingName] = useState(false);
+  const [nameInput, setNameInput] = useState('');
+  const [nameSaving, setNameSaving] = useState(false);
 
   // TOTP state
   const [totpEnabled, setTotpEnabled] = useState<boolean | null>(null);
@@ -193,7 +198,53 @@ export default function SettingsPage() {
         <div className="space-y-3">
           <div>
             <p className="text-xs font-semibold text-dark-muted uppercase tracking-wider mb-1">Full name</p>
-            <p className="text-sm text-dark-text">{user?.name ?? '—'}</p>
+            {editingName ? (
+              <form
+                onSubmit={async (e) => {
+                  e.preventDefault();
+                  setNameSaving(true);
+                  try {
+                    await updateProfile(nameInput.trim());
+                    addToast('Name updated', 'success');
+                    setEditingName(false);
+                    // Reload page to refresh user context
+                    window.location.reload();
+                  } catch (err) {
+                    addToast((err as Error).message || 'Failed to update name', 'error');
+                  } finally {
+                    setNameSaving(false);
+                  }
+                }}
+                className="flex items-center gap-2"
+              >
+                <input
+                  type="text"
+                  value={nameInput}
+                  onChange={(e) => setNameInput(e.target.value)}
+                  required
+                  autoFocus
+                  maxLength={80}
+                  className="input-base text-sm py-1.5 max-w-[220px]"
+                />
+                <button type="submit" disabled={nameSaving || !nameInput.trim()} className="p-1.5 rounded-lg bg-accent text-white hover:bg-accent/90 disabled:opacity-50 transition-colors">
+                  {nameSaving ? <span className="w-3.5 h-3.5 border-2 border-white/30 border-t-white rounded-full animate-spin block" /> : <Check size={14} />}
+                </button>
+                <button type="button" onClick={() => setEditingName(false)} className="p-1.5 rounded-lg text-dark-muted hover:text-dark-text hover:bg-dark-border/40 transition-colors">
+                  <X size={14} />
+                </button>
+              </form>
+            ) : (
+              <div className="flex items-center gap-2 group">
+                <p className="text-sm text-dark-text">{user?.name ?? '—'}</p>
+                <button
+                  onClick={() => { setNameInput(user?.name ?? ''); setEditingName(true); }}
+                  className="opacity-0 group-hover:opacity-100 p-1 rounded text-dark-muted hover:text-dark-text transition-all"
+                  title="Edit name"
+                >
+                  <Pencil size={12} />
+                </button>
+              </div>
+            )}
           </div>
           <div>
             <p className="text-xs font-semibold text-dark-muted uppercase tracking-wider mb-1">Email address</p>

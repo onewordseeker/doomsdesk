@@ -35,8 +35,8 @@ app.use((_req, res, next) => {
 // Middleware
 app.use(cors({
   origin: process.env.CORS_ORIGIN ?? '*',
-  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization'],
+  methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'X-API-Key'],
 }));
 app.use(express.json({ limit: '1mb' }));
 
