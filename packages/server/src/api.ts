@@ -259,6 +259,8 @@ export function createApiRouter(signaling: SignalingServer): Router {
     }
     const newHash = await hashPassword(newPassword);
     updateUserPassword(req.userId!, newHash);
+    const ip = (req.headers['x-forwarded-for'] as string | undefined)?.split(',')[0]?.trim() ?? req.socket.remoteAddress ?? 'unknown';
+    createAuditLog(req.userId!, null, 'password_changed', 'auth', undefined, ip);
     res.status(204).send();
   });
 
@@ -367,6 +369,8 @@ export function createApiRouter(signaling: SignalingServer): Router {
     const id = uuidv4();
 
     const apiKey = createApiKey(id, req.userId!, name.trim(), keyHash, keyPrefix);
+    const ipk = (req.headers['x-forwarded-for'] as string | undefined)?.split(',')[0]?.trim() ?? req.socket.remoteAddress ?? 'unknown';
+    createAuditLog(req.userId!, null, 'api_key_created', 'api_key', name.trim(), ipk);
 
     res.status(201).json({
       key: rawKey,
@@ -386,6 +390,8 @@ export function createApiRouter(signaling: SignalingServer): Router {
       res.status(404).json({ error: 'API key not found' });
       return;
     }
+    const ipr = (req.headers['x-forwarded-for'] as string | undefined)?.split(',')[0]?.trim() ?? req.socket.remoteAddress ?? 'unknown';
+    createAuditLog(req.userId!, null, 'api_key_revoked', 'api_key', req.params.id, ipr);
     res.status(204).send();
   });
 
@@ -463,6 +469,8 @@ export function createApiRouter(signaling: SignalingServer): Router {
     setTotpSecret(req.userId!, pendingSecret);
     enableTotp(req.userId!);
     deletePendingTotp(req.userId!);
+    const ipte = (req.headers['x-forwarded-for'] as string | undefined)?.split(',')[0]?.trim() ?? req.socket.remoteAddress ?? 'unknown';
+    createAuditLog(req.userId!, null, 'totp_enabled', 'auth', undefined, ipte);
     res.json({ enabled: true });
   });
 
@@ -482,6 +490,8 @@ export function createApiRouter(signaling: SignalingServer): Router {
     const delta = totp.validate({ token: code, window: 1 });
     if (delta === null) { res.status(401).json({ error: 'Invalid TOTP code' }); return; }
     disableTotp(req.userId!);
+    const iptd = (req.headers['x-forwarded-for'] as string | undefined)?.split(',')[0]?.trim() ?? req.socket.remoteAddress ?? 'unknown';
+    createAuditLog(req.userId!, null, 'totp_disabled', 'auth', undefined, iptd);
     res.json({ enabled: false });
   });
 
@@ -624,6 +634,8 @@ export function createApiRouter(signaling: SignalingServer): Router {
       res.status(500).json({ error: 'Delete failed' });
       return;
     }
+    const ip2 = (req.headers['x-forwarded-for'] as string | undefined)?.split(',')[0]?.trim() ?? req.socket.remoteAddress ?? 'unknown';
+    createAuditLog(req.userId!, existing.id, 'device_deleted', 'device', existing.device_id, ip2);
     res.status(204).send();
   });
 
