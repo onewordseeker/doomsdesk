@@ -347,7 +347,7 @@ export default function Session({ peerId, role, onEnd }: Props) {
   async function setupAgentSide(pc: RTCPeerConnection) {
     diag('setting up agent data channels')
 
-    const framesDc = pc.createDataChannel('frames', { ordered: false, maxRetransmits: 0 })
+    const framesDc = pc.createDataChannel('frames', { ordered: true })
     const inputDc = pc.createDataChannel('input')
     const fileDc = pc.createDataChannel('files')
     setDataChannel(inputDc)
@@ -748,6 +748,14 @@ export default function Session({ peerId, role, onEnd }: Props) {
         setFramesChannel(dc)
         dc.onopen = () => {
           diag('frames DC open')
+          // Request keyframe immediately so the decoder gets an IDR on first open/reconnect
+          // without waiting up to 2s for the next periodic IDR from the encoder.
+          setTimeout(() => {
+            const inputDcRef = dcRef.current
+            if (inputDcRef?.readyState === 'open') {
+              inputDcRef.send(JSON.stringify({ type: 'request_keyframe' }))
+            }
+          }, 200)
           // Periodic keyframe refresh: every 30s to prevent silent decoder drift
           const keyframeRefreshId = setInterval(() => {
             const inputDcRef = dcRef.current

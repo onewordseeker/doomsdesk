@@ -396,12 +396,11 @@ mod platform {
         VTSessionSetProperty(session, kVTCompressionPropertyKey_RealTime, kCFBooleanTrue as CFTypeRef);
         VTSessionSetProperty(session, kVTCompressionPropertyKey_AllowFrameReordering, kCFBooleanFalse as CFTypeRef);
 
-        // IDR every 90 frames (3 s at 30 fps).
-        // Shorter intervals (15 frames) cause IDR spam during video playback
-        // which eats the entire bitrate budget — P-frames get almost nothing.
-        // Recovery from packet loss is handled by the controller requesting
-        // a keyframe on decoder error.
-        let v = cf_i32(90);
+        // IDR every 60 frames (2 s at 30 fps).
+        // Reliable DataChannel delivery (ordered: true) means we no longer depend
+        // on IDRs for loss recovery — they only serve as a safety net for initial
+        // connect and decoder resets. 2 s balances startup latency vs IDR overhead.
+        let v = cf_i32(60);
         VTSessionSetProperty(session, kVTCompressionPropertyKey_MaxKeyFrameInterval, v as CFTypeRef);
         CFRelease(v as *const c_void);
 
@@ -409,9 +408,7 @@ mod platform {
         VTSessionSetProperty(session, kVTCompressionPropertyKey_ExpectedFrameRate, v as CFTypeRef);
         CFRelease(v as *const c_void);
 
-        // Belt-and-suspenders: also set a 3 s time-based keyframe cap so FPS
-        // changes don't accidentally produce more IDRs than intended.
-        let v = cf_f64(3.0);
+        let v = cf_f64(2.0);
         VTSessionSetProperty(session, kVTCompressionPropertyKey_MaxKeyFrameIntervalDuration, v as CFTypeRef);
         CFRelease(v as *const c_void);
 
