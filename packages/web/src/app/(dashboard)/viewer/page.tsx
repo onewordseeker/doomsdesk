@@ -72,30 +72,40 @@ function randomId(len = 8): string {
   return Math.random().toString(36).slice(2, 2 + len);
 }
 
+/** Find the offset of the first NAL unit payload after Annex-B start code. */
+function findNalOffset(data: Uint8Array): number {
+  if (data[0] === 0x00 && data[1] === 0x00 && data[2] === 0x00 && data[3] === 0x01) return 4;
+  if (data[0] === 0x00 && data[1] === 0x00 && data[2] === 0x01) return 3;
+  return 0;
+}
+
 /** Detect codec from the first NAL unit byte of an Annex-B frame. */
 function detectCodec(data: Uint8Array): 'h264' | 'h265' | null {
-  // Find start code 0x00000001
-  let offset = 0;
-  if (
-    data[0] === 0x00 &&
-    data[1] === 0x00 &&
-    data[2] === 0x00 &&
-    data[3] === 0x01
-  ) {
-    offset = 4;
-  } else if (data[0] === 0x00 && data[1] === 0x00 && data[2] === 0x01) {
-    offset = 3;
-  }
+  const offset = findNalOffset(data);
   if (offset === 0) return null;
-  const nalType = data[offset] & 0x1f; // H.264 NAL unit type (5 bits)
+  const nalType = data[offset] & 0x1f;        // H.264 NAL unit type (5 bits)
   const h265NalType = (data[offset] >> 1) & 0x3f; // H.265 NAL unit type (6 bits)
-  // H.265 VPS/SPS/PPS start codes: 32,33,34
+  // H.265 VPS/SPS/PPS: 32,33,34
   if (h265NalType >= 32 && h265NalType <= 34) return 'h265';
   // H.264 IDR / SPS / PPS: 5, 7, 8
   if (nalType === 5 || nalType === 7 || nalType === 8) return 'h264';
   // Heuristic: if high-order bit is 0 it's likely H.264
   if ((data[offset] & 0x80) === 0) return 'h264';
   return 'h265';
+}
+
+/** Return true when the Annex-B frame begins with a keyframe NAL unit. */
+function isKeyFrame(data: Uint8Array, codec: 'h264' | 'h265'): boolean {
+  const offset = findNalOffset(data);
+  if (offset === 0) return false;
+  if (codec === 'h264') {
+    const t = data[offset] & 0x1f;
+    return t === 5 || t === 7 || t === 8; // IDR, SPS, PPS
+  } else {
+    const t = (data[offset] >> 1) & 0x3f;
+    // IDR_W_RADL=19, IDR_N_LP=20, CRA=21, VPS=32, SPS=33, PPS=34
+    return (t >= 19 && t <= 21) || (t >= 32 && t <= 34);
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -137,6 +147,7 @@ function ViewerInner() {
   const freezeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const fpsIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const detectedCodecRef = useRef<string>('');
+  const codecTypeRef = useRef<'h264' | 'h265' | null>(null);
 
   // ---------------------------------------------------------------------------
   // Cleanup
@@ -167,6 +178,7 @@ function ViewerInner() {
     frameCountRef.current = 0;
     lastFrameTsRef.current = 0;
     detectedCodecRef.current = '';
+    codecTypeRef.current = null;
     setFrozen(false);
     setStats({ fps: 0, codec: '' });
     // Stop any active recording
@@ -262,6 +274,7 @@ function ViewerInner() {
 
     const codecStr = codec === 'h264' ? 'avc1.640033' : 'hvc1.1.6.L153.B0';
     detectedCodecRef.current = codec === 'h264' ? 'H.264' : 'H.265';
+    codecTypeRef.current = codec;
     setStats((prev) => ({ ...prev, codec: detectedCodecRef.current }));
 
     const decoder = new VideoDecoder({
@@ -306,11 +319,13 @@ function ViewerInner() {
       if (detected) initDecoder(detected);
     }
 
-    if (!decoderRef.current) return;
+    const codec = codecTypeRef.current;
+    if (!decoderRef.current || !codec) return;
 
     try {
+      const key = isKeyFrame(bytes, codec);
       const chunk = new EncodedVideoChunk({
-        type: 'key', // treat all as key — agent sends IDR on reconnect anyway
+        type: key ? 'key' : 'delta',
         timestamp: performance.now() * 1000,
         data: bytes,
       });
