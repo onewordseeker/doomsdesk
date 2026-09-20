@@ -1,6 +1,7 @@
 'use client';
 
 import { useState, FormEvent } from 'react';
+import { useRouter } from 'next/navigation';
 import {
   Monitor,
   Plus,
@@ -197,6 +198,7 @@ function DeleteModal({ device, onClose, onConfirm }: { device: Device; onClose: 
 export default function DevicesPage() {
   const { devices, loading, refresh } = useDevices();
   const { toasts, addToast, removeToast } = useToast();
+  const router = useRouter();
   const [showAddModal, setShowAddModal] = useState(false);
   const [editDevice, setEditDevice] = useState<Device | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<Device | null>(null);
@@ -222,7 +224,7 @@ export default function DevicesPage() {
   }
 
   function handleConnect(deviceId: string) {
-    window.location.href = `doomsdesk://connect?id=${deviceId}`;
+    router.push(`/viewer?id=${encodeURIComponent(deviceId)}`);
   }
 
   return (
