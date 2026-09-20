@@ -148,6 +148,7 @@ function ViewerInner() {
   const fpsIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const detectedCodecRef = useRef<string>('');
   const codecTypeRef = useRef<'h264' | 'h265' | null>(null);
+  const remoteScreenRef = useRef<{ w: number; h: number }>({ w: 1920, h: 1080 });
 
   // ---------------------------------------------------------------------------
   // Cleanup
@@ -179,6 +180,7 @@ function ViewerInner() {
     lastFrameTsRef.current = 0;
     detectedCodecRef.current = '';
     codecTypeRef.current = null;
+    remoteScreenRef.current = { w: 1920, h: 1080 };
     setFrozen(false);
     setStats({ fps: 0, codec: '' });
     // Stop any active recording
@@ -347,7 +349,9 @@ function ViewerInner() {
         if (typeof ev.data !== 'string') return;
         try {
           const msg = JSON.parse(ev.data as string);
-          if (msg.type === 'agent_clipboard' && typeof msg.text === 'string') {
+          if (msg.type === 'screen_info' && typeof msg.width === 'number' && typeof msg.height === 'number') {
+            remoteScreenRef.current = { w: msg.width, h: msg.height };
+          } else if (msg.type === 'agent_clipboard' && typeof msg.text === 'string') {
             navigator.clipboard.writeText(msg.text).catch(() => {});
           }
         } catch { /* ignore */ }
@@ -575,39 +579,37 @@ function ViewerInner() {
     }
   }
 
-  function onCanvasMouseMove(e: React.MouseEvent<HTMLCanvasElement>) {
-    const canvas = canvasRef.current;
-    if (!canvas) return;
+  function toRemoteCoords(e: React.MouseEvent<HTMLCanvasElement>) {
+    const canvas = canvasRef.current!;
     const rect = canvas.getBoundingClientRect();
-    sendInput({
-      type: 'mousemove',
-      x: (e.clientX - rect.left) / rect.width,
-      y: (e.clientY - rect.top) / rect.height,
-    });
+    const { w, h } = remoteScreenRef.current;
+    return {
+      x: Math.round(((e.clientX - rect.left) / rect.width) * w),
+      y: Math.round(((e.clientY - rect.top) / rect.height) * h),
+    };
+  }
+
+  function remoteButton(b: number): string {
+    if (b === 2) return 'right';
+    if (b === 1) return 'middle';
+    if (b === 3) return 'back';
+    if (b === 4) return 'forward';
+    return 'left';
+  }
+
+  function onCanvasMouseMove(e: React.MouseEvent<HTMLCanvasElement>) {
+    if (!canvasRef.current) return;
+    sendInput({ type: 'mousemove', ...toRemoteCoords(e) });
   }
 
   function onCanvasMouseDown(e: React.MouseEvent<HTMLCanvasElement>) {
-    const canvas = canvasRef.current;
-    if (!canvas) return;
-    const rect = canvas.getBoundingClientRect();
-    sendInput({
-      type: 'mousedown',
-      button: e.button,
-      x: (e.clientX - rect.left) / rect.width,
-      y: (e.clientY - rect.top) / rect.height,
-    });
+    if (!canvasRef.current) return;
+    sendInput({ type: 'mousedown', button: remoteButton(e.button), ...toRemoteCoords(e) });
   }
 
   function onCanvasMouseUp(e: React.MouseEvent<HTMLCanvasElement>) {
-    const canvas = canvasRef.current;
-    if (!canvas) return;
-    const rect = canvas.getBoundingClientRect();
-    sendInput({
-      type: 'mouseup',
-      button: e.button,
-      x: (e.clientX - rect.left) / rect.width,
-      y: (e.clientY - rect.top) / rect.height,
-    });
+    if (!canvasRef.current) return;
+    sendInput({ type: 'mouseup', button: remoteButton(e.button), ...toRemoteCoords(e) });
   }
 
   function onCanvasWheel(e: React.WheelEvent<HTMLCanvasElement>) {
@@ -617,36 +619,39 @@ function ViewerInner() {
   // Touch event handlers — map to mouse events for mobile/tablet support
   const lastTouchRef = useRef<{ x: number; y: number } | null>(null);
 
+  function toRemoteTouchCoords(touch: React.Touch, canvas: HTMLCanvasElement) {
+    const rect = canvas.getBoundingClientRect();
+    const { w, h } = remoteScreenRef.current;
+    return {
+      x: Math.round(((touch.clientX - rect.left) / rect.width) * w),
+      y: Math.round(((touch.clientY - rect.top) / rect.height) * h),
+    };
+  }
+
   function onCanvasTouchStart(e: React.TouchEvent<HTMLCanvasElement>) {
     e.preventDefault();
     const canvas = canvasRef.current;
     if (!canvas) return;
-    const rect = canvas.getBoundingClientRect();
-    const t = e.touches[0];
-    const x = (t.clientX - rect.left) / rect.width;
-    const y = (t.clientY - rect.top) / rect.height;
-    lastTouchRef.current = { x, y };
-    sendInput({ type: 'mousemove', x, y });
-    sendInput({ type: 'mousedown', button: 0, x, y });
+    const coords = toRemoteTouchCoords(e.touches[0], canvas);
+    lastTouchRef.current = coords;
+    sendInput({ type: 'mousemove', ...coords });
+    sendInput({ type: 'mousedown', button: 'left', ...coords });
   }
 
   function onCanvasTouchMove(e: React.TouchEvent<HTMLCanvasElement>) {
     e.preventDefault();
     const canvas = canvasRef.current;
     if (!canvas) return;
-    const rect = canvas.getBoundingClientRect();
-    const t = e.touches[0];
-    const x = (t.clientX - rect.left) / rect.width;
-    const y = (t.clientY - rect.top) / rect.height;
-    lastTouchRef.current = { x, y };
-    sendInput({ type: 'mousemove', x, y });
+    const coords = toRemoteTouchCoords(e.touches[0], canvas);
+    lastTouchRef.current = coords;
+    sendInput({ type: 'mousemove', ...coords });
   }
 
   function onCanvasTouchEnd(e: React.TouchEvent<HTMLCanvasElement>) {
     e.preventDefault();
     const last = lastTouchRef.current;
     if (!last) return;
-    sendInput({ type: 'mouseup', button: 0, ...last });
+    sendInput({ type: 'mouseup', button: 'left', ...last });
     lastTouchRef.current = null;
   }
 
@@ -659,12 +664,12 @@ function ViewerInner() {
       }).catch(() => {});
       return;
     }
-    sendInput({ type: 'keydown', key: e.key, code: e.code, ctrl: e.ctrlKey, alt: e.altKey, shift: e.shiftKey, meta: e.metaKey });
+    sendInput({ type: 'keydown', key: e.key, code: e.code, modifiers: { ctrl: e.ctrlKey, alt: e.altKey, shift: e.shiftKey, meta: e.metaKey } });
   }
 
   function onCanvasKeyUp(e: ReactKeyboardEvent<HTMLCanvasElement>) {
     e.preventDefault();
-    sendInput({ type: 'keyup', key: e.key, code: e.code, ctrl: e.ctrlKey, alt: e.altKey, shift: e.shiftKey, meta: e.metaKey });
+    sendInput({ type: 'keyup', key: e.key, code: e.code, modifiers: { ctrl: e.ctrlKey, alt: e.altKey, shift: e.shiftKey, meta: e.metaKey } });
   }
 
   function pushClipboard() {
@@ -698,6 +703,13 @@ function ViewerInner() {
     document.addEventListener('fullscreenchange', onFullscreenChange);
     return () => document.removeEventListener('fullscreenchange', onFullscreenChange);
   }, []);
+
+  // Auto-focus canvas when session becomes connected so keyboard events work immediately
+  useEffect(() => {
+    if (viewerState === 'connected') {
+      setTimeout(() => canvasRef.current?.focus(), 100);
+    }
+  }, [viewerState]);
 
   // ---------------------------------------------------------------------------
   // Cleanup on unmount
