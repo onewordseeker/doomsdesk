@@ -25,6 +25,9 @@ import {
   Tv2,
   ClipboardCopy,
   ClipboardPaste,
+  Camera,
+  Video,
+  VideoOff,
 } from 'lucide-react';
 import clsx from 'clsx';
 
@@ -40,6 +43,11 @@ const WS_URL =
 const ICE_SERVERS: RTCIceServer[] = [
   { urls: 'stun:stun.l.google.com:19302' },
   { urls: 'stun:stun1.l.google.com:19302' },
+  {
+    urls: ['turn:72.62.66.94:3478', 'turn:72.62.66.94:3478?transport=tcp'],
+    username: 'doomsdesk',
+    credential: 'turn123',
+  },
 ];
 
 // How long without frames before we show the "frozen" overlay (ms)
@@ -108,6 +116,11 @@ function ViewerInner() {
   const [stats, setStats] = useState<Stats>({ fps: 0, codec: '' });
   const [frozen, setFrozen] = useState(false);
   const [isFullscreen, setIsFullscreen] = useState(false);
+  const [isRecording, setIsRecording] = useState(false);
+
+  // Recording refs
+  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
+  const recordingChunksRef = useRef<Blob[]>([]);
 
   // WebRTC / WS refs
   const wsRef = useRef<WebSocket | null>(null);
@@ -156,7 +169,64 @@ function ViewerInner() {
     detectedCodecRef.current = '';
     setFrozen(false);
     setStats({ fps: 0, codec: '' });
+    // Stop any active recording
+    if (mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
+      mediaRecorderRef.current.stop();
+    }
+    mediaRecorderRef.current = null;
+    recordingChunksRef.current = [];
+    setIsRecording(false);
   }, []);
+
+  // ---------------------------------------------------------------------------
+  // Screenshot & Recording
+  // ---------------------------------------------------------------------------
+
+  function takeScreenshot() {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const url = canvas.toDataURL('image/png');
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `doomsdesk-${deviceId}-${Date.now()}.png`;
+    a.click();
+  }
+
+  function toggleRecording() {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+
+    if (isRecording) {
+      mediaRecorderRef.current?.stop();
+      return;
+    }
+
+    const stream = canvas.captureStream(30);
+    const mimeType = MediaRecorder.isTypeSupported('video/webm;codecs=vp9')
+      ? 'video/webm;codecs=vp9'
+      : 'video/webm';
+    const mr = new MediaRecorder(stream, { mimeType });
+    recordingChunksRef.current = [];
+
+    mr.ondataavailable = (e) => {
+      if (e.data.size > 0) recordingChunksRef.current.push(e.data);
+    };
+    mr.onstop = () => {
+      const blob = new Blob(recordingChunksRef.current, { type: mimeType });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `doomsdesk-${deviceId}-${Date.now()}.webm`;
+      a.click();
+      URL.revokeObjectURL(url);
+      recordingChunksRef.current = [];
+      setIsRecording(false);
+    };
+
+    mr.start(1000);
+    mediaRecorderRef.current = mr;
+    setIsRecording(true);
+  }
 
   // ---------------------------------------------------------------------------
   // FPS tracking
@@ -811,6 +881,25 @@ function ViewerInner() {
                 className="p-1.5 rounded-lg text-dark-muted hover:text-dark-text hover:bg-dark-border/40 transition-colors"
               >
                 <ClipboardCopy size={14} />
+              </button>
+              <button
+                onClick={takeScreenshot}
+                title="Take screenshot"
+                className="p-1.5 rounded-lg text-dark-muted hover:text-dark-text hover:bg-dark-border/40 transition-colors"
+              >
+                <Camera size={14} />
+              </button>
+              <button
+                onClick={toggleRecording}
+                title={isRecording ? 'Stop recording' : 'Start recording'}
+                className={clsx(
+                  'p-1.5 rounded-lg transition-colors',
+                  isRecording
+                    ? 'text-danger bg-danger/15 hover:bg-danger/25'
+                    : 'text-dark-muted hover:text-dark-text hover:bg-dark-border/40'
+                )}
+              >
+                {isRecording ? <VideoOff size={14} /> : <Video size={14} />}
               </button>
               <button
                 onClick={toggleFullscreen}
