@@ -477,16 +477,14 @@ function ViewerInner() {
         case 'offer': {
           const pc = pcRef.current ?? createPeerConnection();
           try {
-            await pc.setRemoteDescription(
-              new RTCSessionDescription(msg.sdp as RTCSessionDescriptionInit)
-            );
+            await pc.setRemoteDescription({ type: 'offer', sdp: msg.sdp as string });
             const answer = await pc.createAnswer();
             await pc.setLocalDescription(answer);
             ws.send(
               JSON.stringify({
                 type: 'answer',
-                targetId: msg.from ?? deviceId,
-                sdp: pc.localDescription,
+                targetId: (msg.sourceId ?? msg.from ?? deviceId) as string,
+                sdp: answer.sdp,
               })
             );
             setStatusMsg('Establishing encrypted tunnel…');
