@@ -462,7 +462,7 @@ function ViewerInner() {
         }
 
         case 'connect_result': {
-          if (msg.success) {
+          if (msg.approved) {
             setStatusMsg('Waiting for WebRTC offer…');
             createPeerConnection();
           } else {
