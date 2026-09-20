@@ -373,9 +373,9 @@ mod platform {
         width: u32,
         height: u32,
     ) {
-        // Scale initial bitrate to resolution; floor 2 Mbps, cap 8 Mbps
-        let bps = ((width as i64 * height as i64 * 4_000_000) / (1920 * 1080))
-            .clamp(2_000_000, 8_000_000) as i32;
+        // Scale initial bitrate to resolution; floor 3 Mbps, cap 50 Mbps for LAN quality
+        let bps = ((width as i64 * height as i64 * 8_000_000) / (1920 * 1080))
+            .clamp(3_000_000, 50_000_000) as i32;
 
         let v = cf_i32(bps);
         VTSessionSetProperty(session, kVTCompressionPropertyKey_AverageBitRate, v as CFTypeRef);
@@ -526,7 +526,7 @@ mod platform {
         }
 
         pub fn set_bitrate(&mut self, bps: u32) {
-            let v = cf_i32(bps.clamp(2_000_000, 20_000_000) as i32);
+            let v = cf_i32(bps.clamp(2_000_000, 50_000_000) as i32);
             unsafe {
                 VTSessionSetProperty(self.session, kVTCompressionPropertyKey_AverageBitRate, v as *const c_void);
                 CFRelease(v as *const c_void);
@@ -570,8 +570,8 @@ mod platform {
 
     impl Encoder {
         pub fn new(width: u32, height: u32) -> Option<Self> {
-            let bps = ((width as u64 * height as u64 * 4_000_000) / (1920 * 1080))
-                .clamp(2_000_000, 8_000_000) as u32;
+            let bps = ((width as u64 * height as u64 * 8_000_000) / (1920 * 1080))
+                .clamp(3_000_000, 50_000_000) as u32;
             let enc = make_encoder(width, height, bps)?;
             Some(Self { enc, width, height, current_bps: bps })
         }
@@ -600,7 +600,7 @@ mod platform {
         }
 
         pub fn set_bitrate(&mut self, bps: u32) {
-            let clamped = bps.clamp(2_000_000, 20_000_000);
+            let clamped = bps.clamp(2_000_000, 50_000_000);
             if clamped == self.current_bps { return; }
             if let Some(enc) = make_encoder(self.width, self.height, clamped) {
                 self.enc = enc;

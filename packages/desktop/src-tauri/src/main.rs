@@ -524,10 +524,11 @@ async fn start_native_capture(app: AppHandle, state: State<'_, AppState>) -> Res
                 let rgba_img = RgbaImage::from_raw(w, h, frame.data)?;
                 let dyn_img = DynamicImage::ImageRgba8(rgba_img);
 
-                // Cap at 1920 px wide to limit bandwidth; use Triangle filter (fast + good)
+                // SCK already GPU-downscales to ≤1920 wide; only fallback CG frames need resize.
+                // Use Nearest filter — fast, and at this scale difference the quality loss is minimal.
                 let (eff_w, eff_h, rgba) = if w > 1920 {
                     let eff_h = (h as f64 * 1920.0 / w as f64) as u32;
-                    let resized = dyn_img.resize(1920, eff_h, FilterType::Triangle);
+                    let resized = dyn_img.resize_exact(1920, eff_h, FilterType::Nearest);
                     let iw = resized.width();
                     let ih = resized.height();
                     (iw, ih, resized.into_rgba8().into_raw())
@@ -609,7 +610,7 @@ fn set_capture_quality(state: State<'_, AppState>, quality: u8) {
 
 #[tauri::command]
 fn set_capture_bitrate(state: State<'_, AppState>, bps: u32) {
-    let clamped = bps.clamp(2_000_000, 20_000_000);
+    let clamped = bps.clamp(2_000_000, 50_000_000);
     state.capture_bitrate.store(clamped, Ordering::Relaxed);
 }
 
@@ -684,8 +685,8 @@ fn main() {
             let device_id = cfg.device_id.clone();
             let start_minimized = cfg.start_minimized;
 
-            // Broadcast channel for raw H.264 frames; capacity 8 allows brief bursts
-            let (frame_tx, _) = broadcast::channel::<Vec<u8>>(8);
+            // Broadcast channel for raw H.264 frames; capacity 32 prevents frame drops at high bitrate
+            let (frame_tx, _) = broadcast::channel::<Vec<u8>>(32);
 
             app.manage(AppState {
                 config_path: Mutex::new(config_path),
@@ -696,8 +697,8 @@ fn main() {
                 input_worker: Mutex::new(None),
                 permanent_password: Mutex::new(perm_pw.clone()),
                 capture_generation: Arc::new(AtomicU64::new(0)),
-                capture_quality: Arc::new(AtomicU8::new(60)),
-                capture_bitrate: Arc::new(AtomicU32::new(4_000_000)),
+                capture_quality: Arc::new(AtomicU8::new(80)),
+                capture_bitrate: Arc::new(AtomicU32::new(8_000_000)),
                 capture_display: Arc::new(AtomicU32::new(0)),
                 target_fps: Arc::new(AtomicU32::new(30)),
                 keyframe_requested: Arc::new(AtomicBool::new(false)),

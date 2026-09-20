@@ -143,29 +143,46 @@ export default function RemoteDisplay({ framesChannel, dataChannel, remoteScreen
 
     let activeCodec: 'h264' | 'h265' = 'h264'
 
-    const createDecoder = (codec: 'h264' | 'h265') => new VideoDecoder({
-      output: (frame) => {
-        const drawStart = performance.now()
-        if (canvas.width !== frame.displayWidth || canvas.height !== frame.displayHeight) {
-          canvas.width  = frame.displayWidth
-          canvas.height = frame.displayHeight
+    // rAF rendering: decoder stores latest frame here; rAF loop draws at vsync.
+    // This aligns every draw to the display refresh, removing up to 16ms of jitter.
+    let pendingFrame: VideoFrame | null = null
+    let pendingCodec: 'h264' | 'h265' = 'h264'
+    let rafId = 0
+
+    function rafDraw() {
+      if (pendingFrame) {
+        const f = pendingFrame
+        pendingFrame = null
+        if (canvas.width !== f.displayWidth || canvas.height !== f.displayHeight) {
+          canvas.width  = f.displayWidth
+          canvas.height = f.displayHeight
         }
-        ctx.drawImage(frame, 0, 0)
-        frame.close()
+        const drawStart = performance.now()
+        ctx.drawImage(f, 0, 0)
+        f.close()
         decodedMs = decodedMs * 0.9 + (performance.now() - drawStart) * 0.1
         frameCount++
         const now = performance.now()
         if (now - lastFpsLog > 3000) {
           const fps = (frameCount / ((now - lastFpsLog) / 1000)).toFixed(1)
-          const statsPayload = { fps: parseFloat(fps), decodeMs: Math.round(decodedMs), codec }
+          const statsPayload = { fps: parseFloat(fps), decodeMs: Math.round(decodedMs), codec: pendingCodec }
           const dc = dcRef.current
-          if (dc?.readyState === 'open') {
-            dc.send(JSON.stringify({ type: 'stats', ...statsPayload }))
-          }
+          if (dc?.readyState === 'open') dc.send(JSON.stringify({ type: 'stats', ...statsPayload }))
           onStatsRef.current?.(statsPayload)
           frameCount = 0
           lastFpsLog = now
         }
+      }
+      rafId = requestAnimationFrame(rafDraw)
+    }
+
+    const createDecoder = (codec: 'h264' | 'h265') => new VideoDecoder({
+      output: (frame) => {
+        // Drop the previous pending frame if rAF hasn't consumed it yet — we never
+        // want a backlog; always show the freshest decoded frame at the next vsync.
+        if (pendingFrame) pendingFrame.close()
+        pendingFrame = frame
+        pendingCodec = codec
       },
       error: (err) => {
         console.warn('[VideoDecoder] error — resetting:', err)
@@ -185,6 +202,9 @@ export default function RemoteDisplay({ framesChannel, dataChannel, remoteScreen
       return
     }
 
+    // Start vsync-aligned render loop before any frames arrive
+    rafId = requestAnimationFrame(rafDraw)
+
     framesChannel.binaryType = 'arraybuffer'
 
     const onMessage = (e: MessageEvent) => {
@@ -200,6 +220,7 @@ export default function RemoteDisplay({ framesChannel, dataChannel, remoteScreen
       const detectedCodec = detectCodecFromFrame(data)
       if (detectedCodec !== activeCodec && decoder.state !== 'closed') {
         console.info('[VideoDecoder] codec switch:', activeCodec, '→', detectedCodec)
+        if (pendingFrame) { pendingFrame.close(); pendingFrame = null }
         try { decoder.close() } catch {}
         activeCodec = detectedCodec
         decoder = createDecoder(detectedCodec)
@@ -243,6 +264,8 @@ export default function RemoteDisplay({ framesChannel, dataChannel, remoteScreen
     }, 2000)
 
     return () => {
+      cancelAnimationFrame(rafId)
+      if (pendingFrame) { pendingFrame.close(); pendingFrame = null }
       clearInterval(stallId)
       framesChannel.removeEventListener('message', onMessage)
       try { decoder.close() } catch {}

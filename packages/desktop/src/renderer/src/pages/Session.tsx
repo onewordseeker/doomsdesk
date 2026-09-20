@@ -358,7 +358,7 @@ export default function Session({ peerId, role, onEnd }: Props) {
 
     let framesSent = 0
     let framesSkipped = 0
-    let currentBps = 4_000_000
+    let currentBps = 8_000_000
     let qualityPinBps = 0          // 0 = adaptive; >0 = fixed bitrate
     let stableWindows = 0
     let consecutiveErrors = 0
@@ -412,9 +412,9 @@ export default function Session({ peerId, role, onEnd }: Props) {
       if (captureRestarting) return
       captureRestarting = true
       diag(`${reason} — restarting capture`)
-      currentBps = 4_000_000
+      currentBps = 8_000_000
       consecutiveErrors = 0
-      invoke('set_capture_bitrate', { bps: 4_000_000 }).catch(() => {})
+      invoke('set_capture_bitrate', { bps: 8_000_000 }).catch(() => {})
       frameWsRef.current?.close()
       frameWsRef.current = null
       invoke('stop_native_capture').catch(() => {})

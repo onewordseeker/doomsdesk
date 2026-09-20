@@ -193,22 +193,18 @@ mod macos {
     use super::{DisplayInfo, RgbaFrame};
     use std::ffi::c_void;
 
-    #[repr(C)]
-    #[derive(Clone, Copy)]
-    struct CGPoint { x: f64, y: f64 }
+    // ── ScreenCaptureKit C shim (capture_sck.m) ──────────────────────────────
+    extern "C" {
+        fn sck_ensure(display_id: u32) -> i32;
+        fn sck_get_frame(ow: *mut u32, oh: *mut u32, ostride: *mut u32) -> *mut u8;
+        fn sck_free_frame(p: *mut u8);
+    }
 
-    #[repr(C)]
-    #[derive(Clone, Copy)]
-    struct CGSize { width: f64, height: f64 }
-
-    #[repr(C)]
-    #[derive(Clone, Copy)]
-    struct CGRect { origin: CGPoint, size: CGSize }
-
-    // kCGImageAlphaNoneSkipLast = 5, kCGBitmapByteOrderDefault = 0
-    // On little-endian (all modern Macs): gives BGRX in memory.
-    // encode.rs swaps bytes 0↔2 to get BGRA for VideoToolbox.
-    const BITMAP_INFO: u32 = 5;
+    // ── CoreGraphics fallback ─────────────────────────────────────────────────
+    #[repr(C)] #[derive(Clone, Copy)] struct CGPoint { x: f64, y: f64 }
+    #[repr(C)] #[derive(Clone, Copy)] struct CGSize  { width: f64, height: f64 }
+    #[repr(C)] #[derive(Clone, Copy)] struct CGRect  { origin: CGPoint, size: CGSize }
+    const BITMAP_INFO: u32 = 5; // kCGImageAlphaNoneSkipLast, little-endian → BGRX
 
     #[link(name = "CoreGraphics", kind = "framework")]
     extern "C" {
@@ -219,25 +215,37 @@ mod macos {
         fn CGImageGetHeight(image: *mut c_void) -> usize;
         fn CGColorSpaceCreateWithName(name: *const c_void) -> *mut c_void;
         fn CGColorSpaceRelease(cs: *mut c_void);
-        fn CGBitmapContextCreate(
-            data: *mut c_void,
-            width: usize, height: usize,
-            bitsPerComponent: usize,
-            bytesPerRow: usize,
-            space: *mut c_void,
-            bitmapInfo: u32,
-        ) -> *mut c_void;
+        fn CGBitmapContextCreate(data: *mut c_void, w: usize, h: usize,
+            bpc: usize, bpr: usize, space: *mut c_void, bi: u32) -> *mut c_void;
         fn CGContextRelease(ctx: *mut c_void);
         fn CGContextDrawImage(ctx: *mut c_void, rect: CGRect, image: *mut c_void);
-        fn CGGetActiveDisplayList(
-            maxDisplays: u32,
-            activeDisplays: *mut u32,
-            displayCount: *mut u32,
-        ) -> i32;
+        fn CGGetActiveDisplayList(max: u32, ids: *mut u32, count: *mut u32) -> i32;
         fn CGDisplayBounds(displayID: u32) -> CGRect;
-
-        // sRGB color space name constant — ensures accurate colors regardless of display profile
         static kCGColorSpaceSRGB: *const c_void;
+    }
+
+    fn cg_capture(display_id: u32) -> Option<RgbaFrame> {
+        unsafe {
+            let display = if display_id == 0 { CGMainDisplayID() } else { display_id };
+            let img = CGDisplayCreateImage(display);
+            if img.is_null() { return None; }
+            let w = CGImageGetWidth(img);
+            let h = CGImageGetHeight(img);
+            if w == 0 || h == 0 { CGImageRelease(img); return None; }
+            let mut data = vec![0u8; w * h * 4];
+            let cs  = CGColorSpaceCreateWithName(kCGColorSpaceSRGB);
+            let ctx = CGBitmapContextCreate(data.as_mut_ptr() as *mut c_void,
+                w, h, 8, w * 4, cs, BITMAP_INFO);
+            CGColorSpaceRelease(cs);
+            if ctx.is_null() { CGImageRelease(img); return None; }
+            CGContextDrawImage(ctx, CGRect {
+                origin: CGPoint { x: 0.0, y: 0.0 },
+                size: CGSize { width: w as f64, height: h as f64 },
+            }, img);
+            CGContextRelease(ctx);
+            CGImageRelease(img);
+            Some(RgbaFrame { data, width: w as u32, height: h as u32 })
+        }
     }
 
     pub fn list_displays() -> Vec<DisplayInfo> {
@@ -248,59 +256,46 @@ mod macos {
             let main = CGMainDisplayID();
             (0..count as usize).map(|i| {
                 let id = ids[i];
-                let bounds = CGDisplayBounds(id);
-                DisplayInfo {
-                    id,
-                    width: bounds.size.width as u32,
-                    height: bounds.size.height as u32,
-                    is_main: id == main,
-                }
+                let b = CGDisplayBounds(id);
+                DisplayInfo { id, width: b.size.width as u32, height: b.size.height as u32,
+                    is_main: id == main }
             }).collect()
         }
     }
 
     pub fn capture_screen_at(display_id: u32) -> Option<RgbaFrame> {
         unsafe {
-            let display = if display_id == 0 {
-                CGMainDisplayID()
+            // Ensure SCK stream is running (init on first call, reinit on display change).
+            // sck_ensure blocks up to 3 s on first call; subsequent calls return instantly.
+            if sck_ensure(display_id) == 0 {
+                return cg_capture(display_id); // macOS < 12.3 or permission denied
+            }
+
+            let mut w = 0u32; let mut h = 0u32; let mut stride = 0u32;
+            let ptr = sck_get_frame(&mut w, &mut h, &mut stride);
+
+            if ptr.is_null() {
+                // SCK stream is warming up — use legacy path for this one frame
+                return cg_capture(display_id);
+            }
+
+            let stride = stride as usize;
+            let w_usize = w as usize;
+            let h_usize = h as usize;
+
+            // Strip row padding if any (stride may be > w*4 on Retina)
+            let data = if stride == w_usize * 4 {
+                std::slice::from_raw_parts(ptr, stride * h_usize).to_vec()
             } else {
-                display_id
+                let mut packed = Vec::with_capacity(w_usize * h_usize * 4);
+                for row in 0..h_usize {
+                    packed.extend_from_slice(
+                        std::slice::from_raw_parts(ptr.add(row * stride), w_usize * 4));
+                }
+                packed
             };
-
-            let cg_image = CGDisplayCreateImage(display);
-            if cg_image.is_null() { return None; }
-
-            let w = CGImageGetWidth(cg_image);
-            let h = CGImageGetHeight(cg_image);
-            if w == 0 || h == 0 {
-                CGImageRelease(cg_image);
-                return None;
-            }
-
-            let mut rgba = vec![0u8; w * h * 4];
-
-            // Use sRGB color space for accurate, consistent colors across all display types
-            let cs = CGColorSpaceCreateWithName(kCGColorSpaceSRGB);
-            let ctx = CGBitmapContextCreate(
-                rgba.as_mut_ptr() as *mut c_void,
-                w, h, 8, w * 4, cs, BITMAP_INFO,
-            );
-            CGColorSpaceRelease(cs);
-
-            if ctx.is_null() {
-                CGImageRelease(cg_image);
-                return None;
-            }
-
-            let rect = CGRect {
-                origin: CGPoint { x: 0.0, y: 0.0 },
-                size: CGSize { width: w as f64, height: h as f64 },
-            };
-            CGContextDrawImage(ctx, rect, cg_image);
-            CGContextRelease(ctx);
-            CGImageRelease(cg_image);
-
-            Some(RgbaFrame { data: rgba, width: w as u32, height: h as u32 })
+            sck_free_frame(ptr);
+            Some(RgbaFrame { data, width: w, height: h })
         }
     }
 }
