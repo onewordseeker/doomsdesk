@@ -48,9 +48,9 @@ export interface JwtPayload {
   email: string;
 }
 
-export function signToken(user: Pick<DbUser, 'id' | 'email'>): string {
+export function signToken(user: Pick<DbUser, 'id' | 'email'>, expiresIn: string | number = '30d'): string {
   const payload: JwtPayload = { sub: user.id, email: user.email };
-  return jwt.sign(payload, JWT_SECRET, { expiresIn: '30d' });
+  return jwt.sign(payload, JWT_SECRET, { expiresIn } as jwt.SignOptions);
 }
 
 export function verifyToken(token: string): JwtPayload {

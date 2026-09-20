@@ -3,8 +3,8 @@
 import { useState, FormEvent } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
-import { Zap, Mail, Lock, AlertCircle, Eye, EyeOff } from 'lucide-react';
-import { login, setToken } from '@/lib/api';
+import { Zap, Mail, Lock, AlertCircle, Eye, EyeOff, ShieldCheck } from 'lucide-react';
+import { login, verifyTotpLogin, setToken } from '@/lib/api';
 
 export default function LoginPage() {
   const router = useRouter();
@@ -14,13 +14,30 @@ export default function LoginPage() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
 
+  // TOTP state
+  const [totpStep, setTotpStep] = useState(false);
+  const [preAuthToken, setPreAuthToken] = useState('');
+  const [totpCode, setTotpCode] = useState('');
+
   async function handleSubmit(e: FormEvent) {
     e.preventDefault();
     setError('');
     setLoading(true);
     try {
-      const { token } = await login(email, password);
-      setToken(token);
+      if (totpStep) {
+        const { token, user } = await verifyTotpLogin(preAuthToken, totpCode);
+        setToken(token);
+        void user;
+        router.replace('/dashboard');
+        return;
+      }
+      const result = await login(email, password);
+      if (result.totpRequired) {
+        setPreAuthToken(result.preAuthToken);
+        setTotpStep(true);
+        return;
+      }
+      setToken(result.token);
       router.replace('/dashboard');
     } catch (err) {
       setError((err as Error).message || 'Invalid email or password');
@@ -50,50 +67,84 @@ export default function LoginPage() {
         )}
 
         <form onSubmit={handleSubmit} className="space-y-4">
-          {/* Email */}
-          <div>
-            <label className="block text-xs font-semibold text-dark-muted uppercase tracking-wider mb-1.5">
-              Email
-            </label>
-            <div className="relative">
-              <Mail size={15} className="absolute left-3 top-1/2 -translate-y-1/2 text-dark-muted pointer-events-none" />
+          {totpStep ? (
+            /* TOTP step */
+            <div>
+              <div className="flex items-center gap-2 mb-4 text-sm text-dark-muted">
+                <ShieldCheck size={16} className="text-accent flex-shrink-0" />
+                Enter the 6-digit code from your authenticator app.
+              </div>
+              <label className="block text-xs font-semibold text-dark-muted uppercase tracking-wider mb-1.5">
+                Authentication Code
+              </label>
               <input
-                type="email"
-                value={email}
-                onChange={(e) => setEmail(e.target.value)}
-                placeholder="you@example.com"
+                type="text"
+                inputMode="numeric"
+                pattern="[0-9]{6}"
+                maxLength={6}
+                value={totpCode}
+                onChange={(e) => setTotpCode(e.target.value.replace(/\D/g, ''))}
+                placeholder="000000"
                 required
-                autoComplete="email"
-                className="input-base pl-9"
-              />
-            </div>
-          </div>
-
-          {/* Password */}
-          <div>
-            <label className="block text-xs font-semibold text-dark-muted uppercase tracking-wider mb-1.5">
-              Password
-            </label>
-            <div className="relative">
-              <Lock size={15} className="absolute left-3 top-1/2 -translate-y-1/2 text-dark-muted pointer-events-none" />
-              <input
-                type={showPassword ? 'text' : 'password'}
-                value={password}
-                onChange={(e) => setPassword(e.target.value)}
-                placeholder="••••••••"
-                required
-                autoComplete="current-password"
-                className="input-base pl-9 pr-10"
+                autoFocus
+                className="input-base text-center text-2xl tracking-[0.5em] font-mono"
               />
               <button
                 type="button"
-                onClick={() => setShowPassword(!showPassword)}
-                className="absolute right-3 top-1/2 -translate-y-1/2 text-dark-muted hover:text-dark-text transition-colors"
+                onClick={() => { setTotpStep(false); setTotpCode(''); setError(''); }}
+                className="mt-2 text-xs text-dark-muted hover:text-dark-text transition"
               >
-                {showPassword ? <EyeOff size={15} /> : <Eye size={15} />}
+                ← Back to login
               </button>
             </div>
-          </div>
+          ) : (
+            <>
+              {/* Email */}
+              <div>
+                <label className="block text-xs font-semibold text-dark-muted uppercase tracking-wider mb-1.5">
+                  Email
+                </label>
+                <div className="relative">
+                  <Mail size={15} className="absolute left-3 top-1/2 -translate-y-1/2 text-dark-muted pointer-events-none" />
+                  <input
+                    type="email"
+                    value={email}
+                    onChange={(e) => setEmail(e.target.value)}
+                    placeholder="you@example.com"
+                    required
+                    autoComplete="email"
+                    className="input-base pl-9"
+                  />
+                </div>
+              </div>
+
+              {/* Password */}
+              <div>
+                <label className="block text-xs font-semibold text-dark-muted uppercase tracking-wider mb-1.5">
+                  Password
+                </label>
+                <div className="relative">
+                  <Lock size={15} className="absolute left-3 top-1/2 -translate-y-1/2 text-dark-muted pointer-events-none" />
+                  <input
+                    type={showPassword ? 'text' : 'password'}
+                    value={password}
+                    onChange={(e) => setPassword(e.target.value)}
+                    placeholder="••••••••"
+                    required
+                    autoComplete="current-password"
+                    className="input-base pl-9 pr-10"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setShowPassword(!showPassword)}
+                    className="absolute right-3 top-1/2 -translate-y-1/2 text-dark-muted hover:text-dark-text transition-colors"
+                  >
+                    {showPassword ? <EyeOff size={15} /> : <Eye size={15} />}
+                  </button>
+                </div>
+              </div>
+            </>
+          )}
 
           {/* Submit */}
           <button
@@ -104,10 +155,10 @@ export default function LoginPage() {
             {loading ? (
               <>
                 <span className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" />
-                Signing in...
+                {totpStep ? 'Verifying…' : 'Signing in...'}
               </>
             ) : (
-              'Sign in'
+              totpStep ? 'Verify Code' : 'Sign in'
             )}
           </button>
         </form>

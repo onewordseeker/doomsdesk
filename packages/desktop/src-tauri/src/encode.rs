@@ -42,8 +42,9 @@ impl H264Encoder {
 
     /// `rgba` must be exactly `width * height * 4` bytes (RGBA or BGRX channel order — see
     /// platform notes in encode.rs for the byte-swap details).
-    pub fn encode(&mut self, rgba: &[u8], pts_ms: u64) -> Option<EncodedFrame> {
-        self.inner.encode(rgba, self.width, self.height, pts_ms)
+    /// When `force_keyframe` is true the encoder is asked to produce an IDR frame immediately.
+    pub fn encode(&mut self, rgba: &[u8], pts_ms: u64, force_keyframe: bool) -> Option<EncodedFrame> {
+        self.inner.encode(rgba, self.width, self.height, pts_ms, force_keyframe)
     }
 
     pub fn set_bitrate(&mut self, bps: u32) {
@@ -212,6 +213,21 @@ mod platform {
         static kVTCompressionPropertyKey_ProfileLevel: CFStringRef;
         static kVTProfileLevel_H264_High_AutoLevel: CFStringRef;
         static kVTProfileLevel_HEVC_Main_AutoLevel: CFStringRef;
+        static kVTEncodeFrameOptionKey_ForceKeyFrame: CFStringRef;
+    }
+
+    #[link(name = "CoreFoundation", kind = "framework")]
+    extern "C" {
+        fn CFDictionaryCreate(
+            allocator: *const c_void,
+            keys: *const *const c_void,
+            values: *const *const c_void,
+            numValues: CFIndex,
+            keyCallBacks: *const c_void,
+            valueCallBacks: *const c_void,
+        ) -> CFDictionaryRef;
+        static kCFTypeDictionaryKeyCallBacks: c_void;
+        static kCFTypeDictionaryValueCallBacks: c_void;
     }
 
     fn cf_i32(n: i32) -> CFNumberRef {
@@ -429,7 +445,7 @@ mod platform {
             }
         }
 
-        pub fn encode(&mut self, rgba: &[u8], width: u32, height: u32, pts_ms: u64) -> Option<EncodedFrame> {
+        pub fn encode(&mut self, rgba: &[u8], width: u32, height: u32, pts_ms: u64, force_keyframe: bool) -> Option<EncodedFrame> {
             // macOS captures BGRX [B,G,R,X]. VideoToolbox kCVPixelFormatType_32BGRA
             // expects [B,G,R,A] — channel order is identical, just set alpha=255.
             let mut bgra = rgba.to_vec();
@@ -465,16 +481,41 @@ mod platform {
             let pts = cm_time_ms(pts_ms);
             let dur = cm_time_ms(33);
 
+            // Build a frame-properties dictionary requesting a keyframe when asked.
+            // kVTEncodeFrameOptionKey_ForceKeyFrame = kCFBooleanTrue forces an IDR.
+            let frame_props: CFDictionaryRef = if force_keyframe {
+                unsafe {
+                    let key = kVTEncodeFrameOptionKey_ForceKeyFrame as *const c_void;
+                    let val = kCFBooleanTrue as *const c_void;
+                    CFDictionaryCreate(
+                        std::ptr::null(),
+                        &key as *const *const c_void,
+                        &val as *const *const c_void,
+                        1,
+                        &kCFTypeDictionaryKeyCallBacks as *const c_void,
+                        &kCFTypeDictionaryValueCallBacks as *const c_void,
+                    )
+                }
+            } else {
+                std::ptr::null()
+            };
+
             let enc_st = unsafe {
                 VTCompressionSessionEncodeFrame(
                     self.session,
                     pixel_buf,
                     pts, dur,
-                    std::ptr::null(),
+                    frame_props,
                     std::ptr::null_mut(),
                     std::ptr::null_mut(),
                 )
             };
+
+            // Release the frame-properties dictionary if we created one.
+            if !frame_props.is_null() {
+                unsafe { CFRelease(frame_props as *const c_void); }
+            }
+
             unsafe { CVPixelBufferRelease(pixel_buf); }
 
             if enc_st != 0 { return None; }
@@ -537,7 +578,12 @@ mod platform {
 
         pub fn codec_name(&self) -> &'static str { "h264" }
 
-        pub fn encode(&mut self, rgba: &[u8], width: u32, height: u32, _pts_ms: u64) -> Option<EncodedFrame> {
+        pub fn encode(&mut self, rgba: &[u8], width: u32, height: u32, _pts_ms: u64, force_keyframe: bool) -> Option<EncodedFrame> {
+            // Signal the openh264 encoder to produce an IDR frame on the next encode call.
+            if force_keyframe {
+                unsafe { self.enc.raw_api().force_intra_frame(true); }
+            }
+
             let rgb: Vec<u8> = rgba
                 .chunks_exact(4)
                 .flat_map(|p| [p[0], p[1], p[2]])
@@ -575,7 +621,7 @@ mod platform {
     impl Encoder {
         pub fn new(_w: u32, _h: u32) -> Option<Self> { None }
         pub fn codec_name(&self) -> &'static str { "h264" }
-        pub fn encode(&mut self, _r: &[u8], _w: u32, _h: u32, _pts: u64) -> Option<EncodedFrame> { None }
+        pub fn encode(&mut self, _r: &[u8], _w: u32, _h: u32, _pts: u64, _force_keyframe: bool) -> Option<EncodedFrame> { None }
         pub fn set_bitrate(&mut self, _bps: u32) {}
     }
 }

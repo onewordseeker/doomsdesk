@@ -1,5 +1,7 @@
 use serde_json::Value;
 use std::sync::mpsc;
+use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 
 pub struct InputWorker {
     sender: mpsc::SyncSender<Value>,
@@ -7,11 +9,19 @@ pub struct InputWorker {
 }
 
 impl InputWorker {
-    pub fn start(_resource_dir: &std::path::PathBuf) -> Option<Self> {
+    /// Start the input worker thread.
+    ///
+    /// `keyframe_flag` is an optional shared atomic that will be set to `true`
+    /// whenever the controller sends a `{type: "request_keyframe"}` input event.
+    /// Pass `None` if keyframe signalling is not needed.
+    pub fn start(
+        _resource_dir: &std::path::PathBuf,
+        keyframe_flag: Option<Arc<AtomicBool>>,
+    ) -> Option<Self> {
         let (tx, rx) = mpsc::sync_channel::<Value>(256);
         let handle = std::thread::Builder::new()
             .name("aetherlink-input".into())
-            .spawn(move || platform::run_loop(rx))
+            .spawn(move || platform::run_loop(rx, keyframe_flag))
             .ok()?;
         Some(Self { sender: tx, handle: Some(handle) })
     }
@@ -117,6 +127,13 @@ mod platform {
     static CURSOR_X: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(-1);
     static CURSOR_Y: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(-1);
 
+    pub fn run_loop(
+        rx: std::sync::mpsc::Receiver<Value>,
+        keyframe_flag: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    ) {
+        for ev in rx { handle(&ev, keyframe_flag.as_deref()); }
+    }
+
     fn web_key_to_vk(key: &str) -> Option<u16> {
         // Try direct match first, then lowercase for single-char keys
         vk_lookup(key).or_else(|| {
@@ -159,11 +176,7 @@ mod platform {
         })
     }
 
-    pub fn run_loop(rx: std::sync::mpsc::Receiver<Value>) {
-        for ev in rx { handle(&ev); }
-    }
-
-    fn handle(ev: &Value) {
+    fn handle(ev: &Value, keyframe_flag: Option<&std::sync::atomic::AtomicBool>) {
         let t   = ev["type"].as_str().unwrap_or("");
         let x   = ev["x"].as_f64().unwrap_or(0.0);
         let y   = ev["y"].as_f64().unwrap_or(0.0);
@@ -348,6 +361,12 @@ mod platform {
                     }
                 }
 
+                "request_keyframe" => {
+                    if let Some(flag) = keyframe_flag {
+                        flag.store(true, std::sync::atomic::Ordering::Relaxed);
+                    }
+                }
+
                 _ => {}
             }
         }
@@ -423,11 +442,14 @@ mod platform {
         })
     }
 
-    pub fn run_loop(rx: std::sync::mpsc::Receiver<Value>) {
-        for ev in rx { handle(&ev); }
+    pub fn run_loop(
+        rx: std::sync::mpsc::Receiver<Value>,
+        keyframe_flag: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    ) {
+        for ev in rx { handle(&ev, keyframe_flag.as_deref()); }
     }
 
-    fn handle(ev: &Value) {
+    fn handle(ev: &Value, keyframe_flag: Option<&std::sync::atomic::AtomicBool>) {
         let t   = ev["type"].as_str().unwrap_or("");
         let x   = ev["x"].as_i64().unwrap_or(0) as i32;
         let y   = ev["y"].as_i64().unwrap_or(0) as i32;
@@ -625,6 +647,12 @@ $dm.fl=0x00180000;\
                     }
                 }
 
+                "request_keyframe" => {
+                    if let Some(flag) = keyframe_flag {
+                        flag.store(true, std::sync::atomic::Ordering::Relaxed);
+                    }
+                }
+
                 _ => {}
             }
         }
@@ -634,7 +662,10 @@ $dm.fl=0x00180000;\
 // ── Linux / unsupported ───────────────────────────────────────────────────────
 #[cfg(not(any(target_os = "macos", windows)))]
 mod platform {
-    pub fn run_loop(rx: std::sync::mpsc::Receiver<serde_json::Value>) {
+    pub fn run_loop(
+        rx: std::sync::mpsc::Receiver<serde_json::Value>,
+        _keyframe_flag: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    ) {
         for _ in rx {}
     }
 }

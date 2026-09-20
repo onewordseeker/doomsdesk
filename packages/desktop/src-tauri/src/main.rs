@@ -13,7 +13,7 @@ use input::InputWorker;
 use serde_json::Value;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, OnceLock};
-use std::sync::atomic::{AtomicU32, AtomicU64, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicU8, Ordering};
 use tauri::{
     menu::{Menu, MenuItem},
     tray::{MouseButton, TrayIcon, TrayIconBuilder, TrayIconEvent},
@@ -36,6 +36,8 @@ struct AppState {
     capture_quality: Arc<AtomicU8>,
     capture_bitrate: Arc<AtomicU32>,
     capture_display: Arc<AtomicU32>,           // 0 = primary
+    target_fps: Arc<AtomicU32>,                // capture frame rate, clamped [5, 60]
+    keyframe_requested: Arc<AtomicBool>,       // set by controller; cleared after each encode
     frame_tx: broadcast::Sender<Vec<u8>>,      // binary H.264 frames; empty vec = stop signal
     ws_handle: Mutex<Option<tokio::task::JoinHandle<()>>>,
 }
@@ -148,7 +150,7 @@ fn inject_input(state: State<'_, AppState>, event: Value) -> Result<(), String> 
 fn start_input_worker(state: State<'_, AppState>) {
     let mut lock = state.input_worker.lock().unwrap();
     if lock.is_none() {
-        *lock = InputWorker::start(&std::path::PathBuf::new());
+        *lock = InputWorker::start(&std::path::PathBuf::new(), Some(state.keyframe_requested.clone()));
     }
 }
 
@@ -406,6 +408,21 @@ fn set_capture_monitor(state: State<'_, AppState>, display_id: u32) {
     state.capture_display.store(display_id, Ordering::Relaxed);
 }
 
+/// Set the target capture frame rate. Clamped to [5, 60] fps.
+#[tauri::command]
+fn set_capture_fps(state: State<'_, AppState>, fps: u32) -> Result<(), String> {
+    let clamped = fps.clamp(5, 60);
+    state.target_fps.store(clamped, Ordering::Relaxed);
+    Ok(())
+}
+
+/// Signal the capture loop to produce an IDR keyframe on the next encoded frame.
+/// Called from the TypeScript side when the controller sends a request_keyframe input event.
+#[tauri::command]
+fn request_keyframe(state: State<'_, AppState>) {
+    state.keyframe_requested.store(true, Ordering::Relaxed);
+}
+
 /// Start screen capture + local binary WebSocket server.
 /// Returns the port the WS server is listening on.
 /// The agent window connects to ws://127.0.0.1:{port} and receives raw H.264 Annex B frames.
@@ -469,6 +486,8 @@ async fn start_native_capture(app: AppHandle, state: State<'_, AppState>) -> Res
     let gen_ref = state.capture_generation.clone();
     let bitrate_ref = state.capture_bitrate.clone();
     let display_ref = state.capture_display.clone();
+    let fps_ref = state.target_fps.clone();
+    let keyframe_ref = state.keyframe_requested.clone();
     let frame_tx2 = state.frame_tx.clone();
     let my_gen = gen_ref.fetch_add(1, Ordering::SeqCst) + 1;
 
@@ -480,7 +499,6 @@ async fn start_native_capture(app: AppHandle, state: State<'_, AppState>) -> Res
         let mut pts_ms: u64 = 0;
         let mut last_send_ms: u64 = 0;
         let mut last_bitrate: u32 = 0;
-        const FRAME_MS: u64 = 33;          // ~30 fps
         const IDLE_FORCE_MS: u64 = 2_000;  // force keepalive even if screen is static
         // Fraction of changed tiles above which we force an IDR keyframe
         const KEYFRAME_THRESHOLD: f32 = 0.50;
@@ -492,6 +510,11 @@ async fn start_native_capture(app: AppHandle, state: State<'_, AppState>) -> Res
             }
 
             let frame_start = std::time::Instant::now();
+
+            // Dynamic FPS: read target each iteration so changes take effect immediately.
+            let target_fps = fps_ref.load(Ordering::Relaxed).max(1);
+            let frame_ms = 1000u64 / target_fps as u64;
+
             let display_id = display_ref.load(Ordering::Relaxed);
 
             let ok = (|| -> Option<()> {
@@ -538,13 +561,12 @@ async fn start_native_capture(app: AppHandle, state: State<'_, AppState>) -> Res
                     return Some(()); // nothing changed, skip this frame
                 }
 
-                // Signal a forced keyframe to the encoder when a large portion of the
-                // image changed. VideoToolbox honours this through the MaxKeyFrameInterval
-                // setting; if the app later needs explicit IDR forcing, a frame-property
-                // dictionary can be injected here.
-                let _force_keyframe = diff.changed_ratio > KEYFRAME_THRESHOLD;
+                // Force a keyframe when the controller requested one (swap clears the flag
+                // atomically so we only force once) or when a large scene change occurred.
+                let controller_requested = keyframe_ref.swap(false, Ordering::Relaxed);
+                let force_keyframe = controller_requested || diff.changed_ratio > KEYFRAME_THRESHOLD;
 
-                let encoded = enc.encode(&rgba, pts_ms)?;
+                let encoded = enc.encode(&rgba, pts_ms, force_keyframe)?;
                 last_send_ms = pts_ms;
 
                 // Send raw binary — no base64 encoding overhead
@@ -556,12 +578,12 @@ async fn start_native_capture(app: AppHandle, state: State<'_, AppState>) -> Res
                 let _ = app.emit("screen-frame-error", "capture_failed");
             }
 
-            pts_ms = pts_ms.wrapping_add(FRAME_MS);
+            pts_ms = pts_ms.wrapping_add(frame_ms);
 
-            let elapsed = frame_start.elapsed();
-            let budget = std::time::Duration::from_millis(FRAME_MS);
-            if elapsed < budget {
-                std::thread::sleep(budget - elapsed);
+            // Sleep for whatever remains of the frame budget.
+            let elapsed_ms = frame_start.elapsed().as_millis() as u64;
+            if elapsed_ms < frame_ms {
+                std::thread::sleep(std::time::Duration::from_millis(frame_ms - elapsed_ms));
             }
         }
     });
@@ -677,6 +699,8 @@ fn main() {
                 capture_quality: Arc::new(AtomicU8::new(60)),
                 capture_bitrate: Arc::new(AtomicU32::new(4_000_000)),
                 capture_display: Arc::new(AtomicU32::new(0)),
+                target_fps: Arc::new(AtomicU32::new(30)),
+                keyframe_requested: Arc::new(AtomicBool::new(false)),
                 frame_tx,
                 ws_handle: Mutex::new(None),
             });
@@ -724,6 +748,8 @@ fn main() {
             stop_native_capture,
             set_capture_quality,
             set_capture_bitrate,
+            set_capture_fps,
+            request_keyframe,
             list_monitors,
             set_capture_monitor,
             save_received_file,

@@ -107,7 +107,22 @@ function initSchema(db: Database.Database): void {
     );
     CREATE INDEX IF NOT EXISTS idx_api_keys_user ON api_keys(user_id);
     CREATE INDEX IF NOT EXISTS idx_api_keys_hash ON api_keys(key_hash);
+
+    CREATE TABLE IF NOT EXISTS totp_pending (
+      user_id    TEXT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+      secret     TEXT NOT NULL,
+      created_at INTEGER NOT NULL DEFAULT (unixepoch())
+    );
   `);
+
+  // Additive schema migrations (safe on existing databases)
+  const migrations = [
+    "ALTER TABLE users ADD COLUMN totp_secret TEXT",
+    "ALTER TABLE users ADD COLUMN totp_enabled INTEGER NOT NULL DEFAULT 0",
+  ];
+  for (const sql of migrations) {
+    try { db.exec(sql); } catch { /* column already exists */ }
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -120,6 +135,8 @@ export interface DbUser {
   password_hash: string;
   name: string;
   plan: string;
+  totp_secret: string | null;
+  totp_enabled: number; // 0 or 1
   created_at: number;
 }
 
@@ -606,4 +623,44 @@ export function touchApiKeyLastUsed(id: string): void {
   getDb().prepare(
     `UPDATE api_keys SET last_used = unixepoch() WHERE id = ?`
   ).run(id);
+}
+
+// ---------------------------------------------------------------------------
+// TOTP / 2FA
+// ---------------------------------------------------------------------------
+
+export function setTotpSecret(userId: string, secret: string): void {
+  getDb().prepare(
+    `UPDATE users SET totp_secret = ?, totp_enabled = 0 WHERE id = ?`
+  ).run(secret, userId);
+}
+
+export function enableTotp(userId: string): void {
+  getDb().prepare(
+    `UPDATE users SET totp_enabled = 1 WHERE id = ?`
+  ).run(userId);
+}
+
+export function disableTotp(userId: string): void {
+  getDb().prepare(
+    `UPDATE users SET totp_secret = NULL, totp_enabled = 0 WHERE id = ?`
+  ).run(userId);
+}
+
+// Pending TOTP secrets (set before user confirms a code; committed to users on confirm)
+export function savePendingTotp(userId: string, secret: string): void {
+  getDb().prepare(
+    `INSERT OR REPLACE INTO totp_pending (user_id, secret) VALUES (?, ?)`
+  ).run(userId, secret);
+}
+
+export function getPendingTotp(userId: string): string | null {
+  const row = getDb().prepare<[string], { secret: string }>(
+    `SELECT secret FROM totp_pending WHERE user_id = ?`
+  ).get(userId);
+  return row?.secret ?? null;
+}
+
+export function deletePendingTotp(userId: string): void {
+  getDb().prepare(`DELETE FROM totp_pending WHERE user_id = ?`).run(userId);
 }

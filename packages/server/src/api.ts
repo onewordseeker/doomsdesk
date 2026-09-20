@@ -35,7 +35,14 @@ import {
   createApiKey,
   getApiKeysByUserId,
   revokeApiKey,
+  setTotpSecret,
+  enableTotp,
+  disableTotp,
+  savePendingTotp,
+  getPendingTotp,
+  deletePendingTotp,
 } from './db.js';
+import * as OTPAuth from 'otpauth';
 import {
   hashPassword,
   verifyPassword,
@@ -186,6 +193,13 @@ export function createApiRouter(signaling: SignalingServer): Router {
     if (!ok) {
       createAuditLog(user.id, null, 'auth_failed', 'login', 'bad password', ip);
       res.status(401).json({ error: 'Invalid credentials' });
+      return;
+    }
+
+    // If TOTP is enabled, return a short-lived pre-auth token instead of the full JWT
+    if (user.totp_enabled) {
+      const preAuthToken = signToken(user, '5m');
+      res.json({ totpRequired: true, preAuthToken });
       return;
     }
 
@@ -373,6 +387,112 @@ export function createApiRouter(signaling: SignalingServer): Router {
       return;
     }
     res.status(204).send();
+  });
+
+  // =========================================================================
+  // TOTP / 2FA
+  // =========================================================================
+
+  /**
+   * POST /api/auth/totp/verify-login
+   * Exchange a pre-auth token + TOTP code for a full 30-day JWT.
+   * Body: { preAuthToken: string; code: string }
+   */
+  router.post('/auth/totp/verify-login', async (req: Request, res: Response) => {
+    const { preAuthToken, code } = req.body as { preAuthToken?: string; code?: string };
+    if (!preAuthToken || !code) {
+      res.status(400).json({ error: 'preAuthToken and code are required' });
+      return;
+    }
+    let payload: import('./auth.js').JwtPayload;
+    try {
+      payload = (await import('./auth.js')).verifyToken(preAuthToken);
+    } catch {
+      res.status(401).json({ error: 'Invalid or expired pre-auth token' });
+      return;
+    }
+    const user = getUserById(payload.sub);
+    if (!user || !user.totp_enabled || !user.totp_secret) {
+      res.status(401).json({ error: 'TOTP not configured' });
+      return;
+    }
+    const totp = new OTPAuth.TOTP({ secret: OTPAuth.Secret.fromBase32(user.totp_secret), digits: 6 });
+    const delta = totp.validate({ token: code, window: 1 });
+    if (delta === null) {
+      res.status(401).json({ error: 'Invalid TOTP code' });
+      return;
+    }
+    const ip = (req.headers['x-forwarded-for'] as string | undefined)?.split(',')[0]?.trim() ?? req.socket.remoteAddress ?? 'unknown';
+    const token = (await import('./auth.js')).signToken(user);
+    createAuditLog(user.id, null, 'login', 'auth', 'totp', ip);
+    res.json({ token, user: toPublicUser(user) });
+  });
+
+  /**
+   * GET /api/auth/totp/setup
+   * Generates a new TOTP secret, stores it as pending, returns QR URI.
+   */
+  router.get('/auth/totp/setup', requireAuth, (req: AuthRequest, res: Response) => {
+    const user = getUserById(req.userId!);
+    if (!user) { res.status(404).json({ error: 'User not found' }); return; }
+    const secret = new OTPAuth.Secret({ size: 20 });
+    const totp = new OTPAuth.TOTP({
+      issuer: 'DoomsDesk',
+      label: user.email,
+      secret,
+      digits: 6,
+      period: 30,
+    });
+    savePendingTotp(user.id, secret.base32);
+    res.json({ uri: totp.toString(), secret: secret.base32 });
+  });
+
+  /**
+   * POST /api/auth/totp/setup/confirm
+   * Confirms the pending TOTP by verifying a code, then enables 2FA.
+   * Body: { code: string }
+   */
+  router.post('/auth/totp/setup/confirm', requireAuth, (req: AuthRequest, res: Response) => {
+    const { code } = req.body as { code?: string };
+    if (!code) { res.status(400).json({ error: 'code is required' }); return; }
+    const pendingSecret = getPendingTotp(req.userId!);
+    if (!pendingSecret) { res.status(400).json({ error: 'No pending TOTP setup' }); return; }
+    const totp = new OTPAuth.TOTP({ secret: OTPAuth.Secret.fromBase32(pendingSecret), digits: 6 });
+    const delta = totp.validate({ token: code, window: 1 });
+    if (delta === null) { res.status(401).json({ error: 'Invalid code' }); return; }
+    setTotpSecret(req.userId!, pendingSecret);
+    enableTotp(req.userId!);
+    deletePendingTotp(req.userId!);
+    res.json({ enabled: true });
+  });
+
+  /**
+   * DELETE /api/auth/totp
+   * Disables 2FA. Requires current TOTP code or password as confirmation.
+   * Body: { code: string } — current TOTP code
+   */
+  router.delete('/auth/totp', requireAuth, (req: AuthRequest, res: Response) => {
+    const { code } = req.body as { code?: string };
+    if (!code) { res.status(400).json({ error: 'code is required' }); return; }
+    const user = getUserById(req.userId!);
+    if (!user || !user.totp_enabled || !user.totp_secret) {
+      res.status(400).json({ error: '2FA is not enabled' }); return;
+    }
+    const totp = new OTPAuth.TOTP({ secret: OTPAuth.Secret.fromBase32(user.totp_secret), digits: 6 });
+    const delta = totp.validate({ token: code, window: 1 });
+    if (delta === null) { res.status(401).json({ error: 'Invalid TOTP code' }); return; }
+    disableTotp(req.userId!);
+    res.json({ enabled: false });
+  });
+
+  /**
+   * GET /api/auth/totp/status
+   * Returns whether 2FA is enabled for the authenticated user.
+   */
+  router.get('/auth/totp/status', requireAuth, (req: AuthRequest, res: Response) => {
+    const user = getUserById(req.userId!);
+    if (!user) { res.status(404).json({ error: 'User not found' }); return; }
+    res.json({ enabled: user.totp_enabled === 1 });
   });
 
   // =========================================================================

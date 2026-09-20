@@ -163,8 +163,12 @@ async function request<T>(
 
 // ─── Auth ─────────────────────────────────────────────────────────────────────
 
-export async function login(email: string, password: string): Promise<{ token: string; user: User }> {
-  return request<{ token: string; user: User }>('/auth/login', {
+export type LoginResult =
+  | { token: string; user: User; totpRequired?: false }
+  | { totpRequired: true; preAuthToken: string };
+
+export async function login(email: string, password: string): Promise<LoginResult> {
+  return request<LoginResult>('/auth/login', {
     method: 'POST',
     body: JSON.stringify({ email, password }),
   }, false);
@@ -314,6 +318,37 @@ export async function updateMemberRole(teamId: string, userId: string, role: str
     method: 'PATCH',
     body: JSON.stringify({ role }),
   });
+}
+
+// ─── TOTP / 2FA ───────────────────────────────────────────────────────────────
+
+export async function getTotpStatus(): Promise<{ enabled: boolean }> {
+  return request<{ enabled: boolean }>('/auth/totp/status');
+}
+
+export async function setupTotp(): Promise<{ uri: string; secret: string }> {
+  return request<{ uri: string; secret: string }>('/auth/totp/setup');
+}
+
+export async function confirmTotp(code: string): Promise<{ enabled: boolean }> {
+  return request<{ enabled: boolean }>('/auth/totp/setup/confirm', {
+    method: 'POST',
+    body: JSON.stringify({ code }),
+  });
+}
+
+export async function disableTotp(code: string): Promise<{ enabled: boolean }> {
+  return request<{ enabled: boolean }>('/auth/totp', {
+    method: 'DELETE',
+    body: JSON.stringify({ code }),
+  });
+}
+
+export async function verifyTotpLogin(preAuthToken: string, code: string): Promise<{ token: string; user: User }> {
+  return request<{ token: string; user: User }>('/auth/totp/verify-login', {
+    method: 'POST',
+    body: JSON.stringify({ preAuthToken, code }),
+  }, false);
 }
 
 // ─── API Keys ─────────────────────────────────────────────────────────────────

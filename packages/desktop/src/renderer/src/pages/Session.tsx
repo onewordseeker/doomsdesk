@@ -104,6 +104,7 @@ export default function Session({ peerId, role, onEnd }: Props) {
   const [toast, setToast] = useState<string | null>(null)
   const [unreadChat, setUnreadChat] = useState(0)
   const [sessionStats, setSessionStats] = useState<{ fps: number; decodeMs: number; codec: string } | null>(null)
+  const lastRttRef = useRef<number>(0)
   const [showInfoOverlay, setShowInfoOverlay] = useState(false)
   const [remoteAudioEl] = useState(() => {
     const el = document.createElement('audio')
@@ -156,6 +157,15 @@ export default function Session({ peerId, role, onEnd }: Props) {
                   if (dc?.readyState === 'open') dc.send(JSON.stringify({ type: 'set_quality', preset: autoPreset }))
                   diag(`auto quality: ${autoPreset} (ICE=${detected})`)
                 }
+              }
+            }
+            // Capture WebRTC candidate-pair RTT as a supplementary measurement
+            if ((s as any).currentRoundTripTime != null) {
+              const rtcRttMs = Math.round((s as any).currentRoundTripTime * 1000)
+              // Blend with ping-pong RTT: prefer ping-pong when available, otherwise use WebRTC stats
+              if (lastRttRef.current === 0) {
+                lastRttRef.current = rtcRttMs
+                setPeerRtt(rtcRttMs)
               }
             }
             break
@@ -344,6 +354,9 @@ export default function Session({ peerId, role, onEnd }: Props) {
     let stableWindows = 0
     let consecutiveErrors = 0
     let captureRestarting = false
+    let consecutiveDrops = 0
+    let backpressureLowSent = false
+    let currentFps = 30
 
     async function connectFrameWs() {
       const port = await invoke<number>('start_native_capture')
@@ -355,7 +368,27 @@ export default function Session({ peerId, role, onEnd }: Props) {
         if (ev.data.byteLength === 0) return
         consecutiveErrors = 0
         if (framesDc.readyState !== 'open') return
-        if (framesDc.bufferedAmount > 262144) { framesSkipped++; return }
+        if (framesDc.bufferedAmount > 262144) {
+          framesSkipped++
+          consecutiveDrops++
+          if (consecutiveDrops === 3) {
+            backpressureLowSent = true
+            if (inputDc.readyState === 'open') {
+              inputDc.send(JSON.stringify({ type: 'set_quality', preset: 'low' }))
+              diag('backpressure: emergency quality → low')
+            }
+          }
+          return
+        }
+        if (backpressureLowSent) {
+          backpressureLowSent = false
+          consecutiveDrops = 0
+          if (inputDc.readyState === 'open') {
+            inputDc.send(JSON.stringify({ type: 'set_quality', preset: 'auto' }))
+            diag('backpressure cleared: quality → auto')
+          }
+        }
+        consecutiveDrops = 0
         framesDc.send(ev.data)
         framesSent++
       }
@@ -494,6 +527,9 @@ export default function Session({ peerId, role, onEnd }: Props) {
           } else {
             diag('quality preset: auto (adaptive)')
           }
+        } else if (msg.type === 'request_keyframe') {
+          invoke('request_keyframe').catch(() => {})
+          diag('keyframe requested by controller')
         } else if (msg.type === 'ping') {
           if (inputDc.readyState === 'open') inputDc.send(JSON.stringify({ type: 'pong', t: msg.t }))
         } else if (msg.type === 'chat') {
@@ -544,13 +580,24 @@ export default function Session({ peerId, role, onEnd }: Props) {
     setRemoteScreenSize({ width: window.screen.width, height: window.screen.height })
     origScreenRef.current = { width: window.screen.width, height: window.screen.height }
 
-    // Adaptive bitrate — 2 Mbps floor, 8 Mbps ceiling
+    // Adaptive bitrate + dynamic FPS — 2 Mbps floor, 16 Mbps ceiling
+    // RTT is measured via ping/pong on the input DC (see controller side ping interval).
+    // The agent reads it back from pong echoes sent to the controller — we approximate
+    // RTT here using the last value reported via the bitrate_info channel.
+    // For direct RTT measurement on the agent side, we send a ping to the controller.
+    let agentRtt = 0
+    const agentPingInterval = setInterval(() => {
+      if (inputDc.readyState === 'open') inputDc.send(JSON.stringify({ type: 'agent_ping', t: Date.now() }))
+    }, 3000)
+    agentCleanups.push(() => clearInterval(agentPingInterval))
+
     const bitrateInterval = setInterval(() => {
       const total = framesSent + framesSkipped
       if (total === 0) return
       const skipRate = framesSkipped / total
+      const rtt = agentRtt  // ms; 0 means unknown → skip RTT-based logic
       const mbps = (currentBps / 1_000_000).toFixed(1)
-      diag(`sent=${framesSent} skip=${framesSkipped} skip%=${Math.round(skipRate * 100)} bps=${mbps}M`)
+      diag(`sent=${framesSent} skip=${framesSkipped} skip%=${Math.round(skipRate * 100)} bps=${mbps}M rtt=${rtt}ms`)
 
       if (qualityPinBps > 0) {
         // Fixed quality preset — pin bitrate, skip adaptive logic
@@ -559,23 +606,54 @@ export default function Session({ peerId, role, onEnd }: Props) {
           invoke('set_capture_bitrate', { bps: currentBps }).catch(() => {})
           diag(`bitrate pinned ${(currentBps / 1_000_000).toFixed(1)} Mbps`)
         }
-      } else if (skipRate > 0.05) {
-        const factor = skipRate > 0.5 ? 0.5 : skipRate > 0.2 ? 0.7 : 0.85
-        currentBps = Math.max(2_000_000, Math.round(currentBps * factor))
-        invoke('set_capture_bitrate', { bps: currentBps }).catch(() => {})
-        stableWindows = 0
-        diag(`bitrate ↓ ${(currentBps / 1_000_000).toFixed(1)} Mbps`)
-      } else if (skipRate === 0) {
-        stableWindows++
-        if (stableWindows >= 2 && currentBps < 16_000_000) {
-          currentBps = Math.min(16_000_000, Math.round(currentBps * 1.2))
+      } else {
+        // Combined skip-rate + RTT decision
+        const rttPoor = rtt > 300
+        const rttMarginal = rtt > 150 && rtt <= 300
+        const rttGood = rtt > 0 && rtt <= 50
+
+        if (skipRate > 0.05 || rttPoor) {
+          const factor = (skipRate > 0.5 || rttPoor) ? 0.5 : (skipRate > 0.2 || rttMarginal) ? 0.7 : 0.85
+          currentBps = Math.max(2_000_000, Math.round(currentBps * factor))
           invoke('set_capture_bitrate', { bps: currentBps }).catch(() => {})
           stableWindows = 0
-          diag(`bitrate ↑ ${(currentBps / 1_000_000).toFixed(1)} Mbps`)
+          diag(`bitrate ↓ ${(currentBps / 1_000_000).toFixed(1)} Mbps (skip=${Math.round(skipRate * 100)}% rtt=${rtt}ms)`)
+        } else if (skipRate === 0 && !rttMarginal && !rttPoor) {
+          stableWindows++
+          if (stableWindows >= 2 && currentBps < 16_000_000) {
+            currentBps = Math.min(16_000_000, Math.round(currentBps * 1.2))
+            invoke('set_capture_bitrate', { bps: currentBps }).catch(() => {})
+            stableWindows = 0
+            diag(`bitrate ↑ ${(currentBps / 1_000_000).toFixed(1)} Mbps`)
+          }
+        } else {
+          stableWindows = 0
         }
-      } else {
-        stableWindows = 0
+
+        // Dynamic FPS based on RTT
+        if (rtt > 0) {
+          let targetFps: number
+          if (rttPoor) {
+            targetFps = 15
+          } else if (rttMarginal) {
+            targetFps = 20
+          } else {
+            targetFps = 30
+          }
+          if (targetFps !== currentFps) {
+            currentFps = targetFps
+            invoke('set_capture_fps', { fps: targetFps }).catch(() => {})
+            // Inform controller so it can display current FPS cap
+            const d = dcRef.current
+            if (d?.readyState === 'open') d.send(JSON.stringify({ type: 'fps_changed', fps: targetFps }))
+            diag(`FPS → ${targetFps} (rtt=${rtt}ms)`)
+          }
+        } else if (rttGood && currentFps < 30) {
+          currentFps = 30
+          invoke('set_capture_fps', { fps: 30 }).catch(() => {})
+        }
       }
+
       // Inform controller of current bitrate and skip rate (network quality proxy)
       const d = dcRef.current
       if (d?.readyState === 'open') {
@@ -585,6 +663,17 @@ export default function Session({ peerId, role, onEnd }: Props) {
       framesSkipped = 0
     }, 3000)
     agentCleanups.push(() => clearInterval(bitrateInterval))
+
+    // Handle agent_pong from controller (to measure round-trip from agent's perspective)
+    const origInputOnMessage = inputDc.onmessage
+    inputDc.addEventListener('message', (ev: MessageEvent) => {
+      try {
+        const msg = JSON.parse(ev.data)
+        if (msg.type === 'agent_pong' && msg.t) {
+          agentRtt = Date.now() - msg.t
+        }
+      } catch {}
+    })
 
     // Auto-sync clipboard: push remote clipboard to controller whenever it changes
     let lastClipboard = ''
@@ -664,7 +753,20 @@ export default function Session({ peerId, role, onEnd }: Props) {
       if (dc.label === 'frames') {
         dc.binaryType = 'arraybuffer'
         setFramesChannel(dc)
-        dc.onopen = () => diag('frames DC open')
+        dc.onopen = () => {
+          diag('frames DC open')
+          // Periodic keyframe refresh: every 30s to prevent silent decoder drift
+          const keyframeRefreshId = setInterval(() => {
+            const inputDcRef = dcRef.current
+            if (inputDcRef?.readyState === 'open') {
+              inputDcRef.send(JSON.stringify({ type: 'request_keyframe' }))
+            }
+          }, 30_000)
+          dc.onclose = () => {
+            diag('frames DC closed')
+            clearInterval(keyframeRefreshId)
+          }
+        }
         dc.onclose = () => diag('frames DC closed')
       } else if (dc.label === 'input') {
         setDataChannel(dc)
@@ -690,8 +792,17 @@ export default function Session({ peerId, role, onEnd }: Props) {
               setRenderStats((prev) => prev
                 ? { ...prev, bps: msg.bps, skipPct: msg.skipPct }
                 : { fps: 0, decodeMs: 0, bps: msg.bps, skipPct: msg.skipPct })
+            } else if (msg.type === 'fps_changed') {
+              diag(`remote FPS cap: ${msg.fps}`)
+            } else if (msg.type === 'agent_ping') {
+              // Echo back so agent can measure RTT from its own perspective
+              if (dc.readyState === 'open') dc.send(JSON.stringify({ type: 'agent_pong', t: msg.t }))
             } else if (msg.type === 'pong') {
-              if (msg.t) setPeerRtt(Date.now() - msg.t)
+              if (msg.t) {
+                const rtt = Date.now() - msg.t
+                setPeerRtt(rtt)
+                lastRttRef.current = rtt
+              }
             } else if (msg.type === 'chat') {
               const text = msg.text ?? ''
               setChatMessages((prev) => [...prev, { from: 'them', text, ts: Date.now() }])
@@ -1797,6 +1908,41 @@ export default function Session({ peerId, role, onEnd }: Props) {
             <div className="flex items-center justify-between gap-6">
               <span className="text-slate-400">Resolution</span>
               <span className="text-white">{remoteScreenSize.width}×{remoteScreenSize.height}</span>
+            </div>
+            <div className="flex items-center justify-between gap-6">
+              <span className="text-slate-400">RTT</span>
+              <span className={
+                peerRtt == null ? 'text-slate-500' :
+                peerRtt > 300 ? 'text-red-400' :
+                peerRtt > 150 ? 'text-amber-400' : 'text-emerald-400'
+              }>
+                {peerRtt != null ? `${peerRtt}ms` : '—'}
+              </span>
+            </div>
+            <div className="flex items-center justify-between gap-6">
+              <span className="text-slate-400">Bitrate</span>
+              <span className="text-white">
+                {renderStats?.bps != null ? `${(renderStats.bps / 1_000_000).toFixed(1)} Mbps` : '—'}
+              </span>
+            </div>
+            <div className="flex items-center justify-between gap-6">
+              <span className="text-slate-400">Skip</span>
+              <span className={
+                (renderStats?.skipPct ?? 0) > 20 ? 'text-red-400' :
+                (renderStats?.skipPct ?? 0) > 5 ? 'text-amber-400' : 'text-emerald-400'
+              }>
+                {renderStats?.skipPct != null ? `${renderStats.skipPct}%` : '—'}
+              </span>
+            </div>
+            <div className="flex items-center justify-between gap-6">
+              <span className="text-slate-400">Network</span>
+              <span className={
+                iceType === 'host' ? 'text-emerald-400' :
+                iceType === 'srflx' ? 'text-sky-400' :
+                iceType === 'relay' ? 'text-amber-400' : 'text-slate-500'
+              }>
+                {iceType === 'host' ? 'LAN (direct)' : iceType === 'srflx' ? 'P2P (STUN)' : iceType === 'relay' ? 'TURN relay' : '—'}
+              </span>
             </div>
             <div className="flex items-center justify-between gap-6">
               <span className="text-slate-400">State</span>
