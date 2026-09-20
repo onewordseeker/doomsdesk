@@ -190,6 +190,8 @@ export default function RemoteDisplay({ framesChannel, dataChannel, remoteScreen
           decoder.reset()
           decoder.configure({ codec: activeCodec === 'h265' ? H265_CODEC : H264_CODEC, optimizeForLatency: true })
         } catch {}
+        const dc = dcRef.current
+        if (dc?.readyState === 'open') dc.send(JSON.stringify({ type: 'request_keyframe' }))
       },
     })
 

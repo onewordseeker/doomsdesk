@@ -512,9 +512,10 @@ async fn start_native_capture(app: AppHandle, state: State<'_, AppState>) -> Res
         let mut pts_ms: u64 = 0;
         let mut last_send_ms: u64 = 0;
         let mut last_bitrate: u32 = 0;
-        const IDLE_FORCE_MS: u64 = 2_000;  // force keepalive even if screen is static
-        // Fraction of changed tiles above which we force an IDR keyframe
-        const KEYFRAME_THRESHOLD: f32 = 0.50;
+        let mut prev_changed_ratio: f32 = 0.0;
+        // Re-encode static frames every 1 s to let the encoder refine quality
+        // (same technique as RustDesk's "static frame refinement").
+        const STATIC_REFINE_MS: u64 = 1_000;
 
         loop {
             if gen_ref.load(Ordering::SeqCst) != my_gen {
@@ -568,19 +569,25 @@ async fn start_native_capture(app: AppHandle, state: State<'_, AppState>) -> Res
                     last_bitrate = clamped;
                 }
 
-                // Tile-based change detection: skip encoding entirely for static frames,
-                // and force an IDR when more than half the tiles changed (scene cut).
                 let diff = differ.diff(&rgba, eff_w, eff_h);
 
-                let idle_too_long = pts_ms.saturating_sub(last_send_ms) >= IDLE_FORCE_MS;
-                if diff.is_static && !idle_too_long {
-                    return Some(()); // nothing changed, skip this frame
+                // Skip static frames — re-encode every 1 s so the encoder can
+                // refine quality on unchanged content (RustDesk calls this
+                // "static frame refinement").
+                let refine_due = pts_ms.saturating_sub(last_send_ms) >= STATIC_REFINE_MS;
+                if diff.is_static && !refine_due {
+                    prev_changed_ratio = 0.0;
+                    return Some(());
                 }
 
-                // Force a keyframe when the controller requested one (swap clears the flag
-                // atomically so we only force once) or when a large scene change occurred.
+                // Scene-cut keyframe: screen was quiet, suddenly ≥60 % of tiles
+                // changed → new scene, decoder needs an anchor.
+                // DO NOT force keyframe on sustained high motion (video playback) —
+                // that caused IDR spam at 30 fps which ate the entire bitrate budget.
+                let scene_cut = prev_changed_ratio < 0.15 && diff.changed_ratio >= 0.60;
                 let controller_requested = keyframe_ref.swap(false, Ordering::Relaxed);
-                let force_keyframe = controller_requested || diff.changed_ratio > KEYFRAME_THRESHOLD;
+                let force_keyframe = controller_requested || scene_cut;
+                prev_changed_ratio = diff.changed_ratio;
 
                 let encoded = enc.encode(&rgba, pts_ms, force_keyframe)?;
                 last_send_ms = pts_ms;

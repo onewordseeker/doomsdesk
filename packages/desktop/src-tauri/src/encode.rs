@@ -214,6 +214,7 @@ mod platform {
         static kVTProfileLevel_H264_High_AutoLevel: CFStringRef;
         static kVTProfileLevel_HEVC_Main_AutoLevel: CFStringRef;
         static kVTEncodeFrameOptionKey_ForceKeyFrame: CFStringRef;
+        static kVTCompressionPropertyKey_MaxKeyFrameIntervalDuration: CFStringRef;
     }
 
     #[link(name = "CoreFoundation", kind = "framework")]
@@ -236,6 +237,17 @@ mod platform {
                 std::ptr::null(),
                 kCFNumberSInt32Type,
                 &n as *const i32 as *const c_void,
+            )
+        }
+    }
+
+    fn cf_f64(n: f64) -> CFNumberRef {
+        const kCFNumberFloat64Type: i32 = 14;
+        unsafe {
+            CFNumberCreate(
+                std::ptr::null(),
+                kCFNumberFloat64Type,
+                &n as *const f64 as *const c_void,
             )
         }
     }
@@ -384,13 +396,23 @@ mod platform {
         VTSessionSetProperty(session, kVTCompressionPropertyKey_RealTime, kCFBooleanTrue as CFTypeRef);
         VTSessionSetProperty(session, kVTCompressionPropertyKey_AllowFrameReordering, kCFBooleanFalse as CFTypeRef);
 
-        // IDR every 15 frames (0.5 s at 30 fps) — fast recovery from packet loss
-        let v = cf_i32(15);
+        // IDR every 90 frames (3 s at 30 fps).
+        // Shorter intervals (15 frames) cause IDR spam during video playback
+        // which eats the entire bitrate budget — P-frames get almost nothing.
+        // Recovery from packet loss is handled by the controller requesting
+        // a keyframe on decoder error.
+        let v = cf_i32(90);
         VTSessionSetProperty(session, kVTCompressionPropertyKey_MaxKeyFrameInterval, v as CFTypeRef);
         CFRelease(v as *const c_void);
 
         let v = cf_i32(60);
         VTSessionSetProperty(session, kVTCompressionPropertyKey_ExpectedFrameRate, v as CFTypeRef);
+        CFRelease(v as *const c_void);
+
+        // Belt-and-suspenders: also set a 3 s time-based keyframe cap so FPS
+        // changes don't accidentally produce more IDRs than intended.
+        let v = cf_f64(3.0);
+        VTSessionSetProperty(session, kVTCompressionPropertyKey_MaxKeyFrameIntervalDuration, v as CFTypeRef);
         CFRelease(v as *const c_void);
 
         let profile = match codec {
