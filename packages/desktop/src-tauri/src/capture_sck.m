@@ -11,11 +11,12 @@
 
 // ---- Shared frame buffer ----
 typedef struct { uint8_t *data; uint32_t w, h, stride; } SckBuf;
-static NSLock     *gLock        = nil;
-static SckBuf      gLatest      = {0};
-static SCStream   *gStream      = nil;
-static uint32_t    gStreamDisp  = UINT32_MAX;
-static _Atomic int gReady       = 0;  // 1 once first frame arrives
+static NSLock     *gLock            = nil;
+static SckBuf      gLatest          = {0};
+static SCStream   *gStream          = nil;
+static uint32_t    gStreamDisp      = UINT32_MAX;
+static _Atomic int gReady           = 0;  // 1 once first frame arrives
+static NSDate     *gLastStartAttempt = nil; // throttle restart attempts
 
 // ---- Delegate ----
 @interface SckDelegate : NSObject <SCStreamOutput, SCStreamDelegate>
@@ -107,10 +108,24 @@ static int _start_stream(uint32_t display_id) {
 
 // ---- C API ----
 
+// Reset the start-attempt cooldown (call before an explicit capture restart).
+void sck_reset(void) {
+    gLastStartAttempt = nil;
+}
+
 // Ensure stream is running for display_id. 0 = primary.
+// Throttles restart attempts to once every 5 s to prevent spamming the macOS
+// screen-recording permission TCC dialog when permission is denied or the stream
+// failed — without this the 30 fps capture loop retries on every single frame.
 int sck_ensure(uint32_t display_id) {
     @autoreleasepool {
         if (gStream && gStreamDisp == display_id) return 1;
+        // Throttle: don't retry faster than once every 5 seconds after a failure.
+        if (gLastStartAttempt &&
+            [[NSDate date] timeIntervalSinceDate:gLastStartAttempt] < 5.0) {
+            return 0;
+        }
+        gLastStartAttempt = [NSDate date];
         // Stop existing stream if display changed
         if (gStream) {
             [gStream stopCaptureWithCompletionHandler:^(NSError *e){}];
@@ -140,6 +155,7 @@ void sck_free_frame(uint8_t *p) { if (p) free(p); }
 
 void sck_stop(void) {
     @autoreleasepool {
+        gLastStartAttempt = nil; // allow immediate restart after explicit stop
         if (gStream) {
             [gStream stopCaptureWithCompletionHandler:^(NSError *e){}];
             gStream = nil; gStreamDisp = UINT32_MAX;

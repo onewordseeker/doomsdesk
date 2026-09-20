@@ -27,7 +27,7 @@ pub struct DisplayInfo {
 }
 
 #[cfg(target_os = "macos")]
-pub use macos::{list_displays, capture_screen_at};
+pub use macos::{list_displays, capture_screen_at, sck_reset};
 
 #[cfg(not(target_os = "macos"))]
 pub use fallback::{list_displays, capture_screen_at};
@@ -198,6 +198,7 @@ mod macos {
         fn sck_ensure(display_id: u32) -> i32;
         fn sck_get_frame(ow: *mut u32, oh: *mut u32, ostride: *mut u32) -> *mut u8;
         fn sck_free_frame(p: *mut u8);
+        pub fn sck_reset();  // clear start-attempt cooldown before explicit restart
     }
 
     // ── CoreGraphics fallback ─────────────────────────────────────────────────

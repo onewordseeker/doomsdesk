@@ -47,6 +47,8 @@ struct AppState {
     capture_display: Arc<AtomicU32>,           // 0 = primary
     target_fps: Arc<AtomicU32>,                // capture frame rate, clamped [5, 60]
     keyframe_requested: Arc<AtomicBool>,       // set by controller; cleared after each encode
+    codec_preference: Arc<AtomicU32>,          // 0=auto, 1=h264, 2=h265
+    codec_dirty: Arc<AtomicBool>,              // force encoder recreation on next frame
     frame_tx: broadcast::Sender<Vec<u8>>,      // binary H.264 frames; empty vec = stop signal
     ws_handle: Mutex<Option<tokio::task::JoinHandle<()>>>,
 }
@@ -432,6 +434,15 @@ fn request_keyframe(state: State<'_, AppState>) {
     state.keyframe_requested.store(true, Ordering::Relaxed);
 }
 
+/// Set codec preference: "auto" (default), "h264", or "h265".
+/// Forces encoder recreation on the next capture frame.
+#[tauri::command]
+fn set_codec(state: State<'_, AppState>, codec: String) {
+    let pref: u32 = match codec.as_str() { "h264" => 1, "h265" => 2, _ => 0 };
+    state.codec_preference.store(pref, Ordering::Relaxed);
+    state.codec_dirty.store(true, Ordering::Relaxed);
+}
+
 /// Start screen capture + local binary WebSocket server.
 /// Returns the port the WS server is listening on.
 /// The agent window connects to ws://127.0.0.1:{port} and receives raw H.264 Annex B frames.
@@ -491,12 +502,18 @@ async fn start_native_capture(app: AppHandle, state: State<'_, AppState>) -> Res
 
     *state.ws_handle.lock().unwrap() = Some(ws_task);
 
+    // Reset SCK start-attempt cooldown so the new capture session starts immediately.
+    #[cfg(target_os = "macos")]
+    unsafe { capture::sck_reset(); }
+
     // Capture + encode loop (blocking thread)
     let gen_ref = state.capture_generation.clone();
     let bitrate_ref = state.capture_bitrate.clone();
     let display_ref = state.capture_display.clone();
     let fps_ref = state.target_fps.clone();
     let keyframe_ref = state.keyframe_requested.clone();
+    let codec_pref_ref = state.codec_preference.clone();
+    let codec_dirty_ref = state.codec_dirty.clone();
     let frame_tx2 = state.frame_tx.clone();
     let my_gen = gen_ref.fetch_add(1, Ordering::SeqCst) + 1;
 
@@ -552,9 +569,13 @@ async fn start_native_capture(app: AppHandle, state: State<'_, AppState>) -> Res
                     (w, h, dyn_img.into_rgba8().into_raw())
                 };
 
-                // Recreate encoder only when resolution changes; reset differ too
-                if encoder.as_ref().map(|e| e.dimensions()) != Some((eff_w, eff_h)) {
-                    encoder = encode::H264Encoder::new(eff_w, eff_h);
+                // Recreate encoder on resolution change or explicit codec switch.
+                let dims_changed = encoder.as_ref().map(|e| e.dimensions()) != Some((eff_w, eff_h));
+                let codec_changed = codec_dirty_ref.swap(false, Ordering::Relaxed);
+                if dims_changed || codec_changed {
+                    let pref = codec_pref_ref.load(Ordering::Relaxed);
+                    let codec_override = match pref { 1 => Some(encode::CodecType::H264), 2 => Some(encode::CodecType::H265), _ => None };
+                    encoder = encode::H264Encoder::new_with_codec(eff_w, eff_h, codec_override);
                     differ.force_reset();
                     pts_ms = 0;
                     last_send_ms = 0;
@@ -724,6 +745,8 @@ fn main() {
                 capture_display: Arc::new(AtomicU32::new(0)),
                 target_fps: Arc::new(AtomicU32::new(30)),
                 keyframe_requested: Arc::new(AtomicBool::new(false)),
+                codec_preference: Arc::new(AtomicU32::new(0)),
+                codec_dirty: Arc::new(AtomicBool::new(false)),
                 frame_tx,
                 ws_handle: Mutex::new(None),
             });
@@ -785,6 +808,7 @@ fn main() {
             check_macos_permissions,
             open_privacy_settings,
             wake_on_lan,
+            set_codec,
         ])
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {

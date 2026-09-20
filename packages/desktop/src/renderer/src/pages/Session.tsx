@@ -4,9 +4,9 @@ import { listen } from '@tauri-apps/api/event'
 import { getCurrentWindow } from '@tauri-apps/api/window'
 import RemoteDisplay from '../components/RemoteDisplay'
 import {
-  Maximize2, Minimize2, ZoomIn, ZoomOut, Expand, Shrink,
+  Maximize2, Minimize2, ZoomIn, ZoomOut,
   Clipboard, X, Monitor, MessageSquare, Send, Tv2,
-  Upload, Download, Mic, MicOff, Lock, Activity, Camera, Circle, Gauge, Crosshair, HelpCircle, Moon, Power, Keyboard, RefreshCw, Info
+  Upload, Download, Mic, MicOff, Lock, Activity, Camera, Circle, Gauge, Crosshair, HelpCircle, Moon, Power, Keyboard, RefreshCw, Info, Mouse, MousePointerBan
 } from 'lucide-react'
 
 interface Props {
@@ -100,6 +100,9 @@ export default function Session({ peerId, role, onEnd }: Props) {
   const [dragOver, setDragOver] = useState(false)
   const [pointerLockEnabled, setPointerLockEnabled] = useState(false)
   const [keyPassthrough, setKeyPassthrough] = useState(true)
+  const [mousePassthrough, setMousePassthrough] = useState(true)
+  const [codecPreset, setCodecPreset] = useState<'auto' | 'h264' | 'h265'>('auto')
+  const [scaleMode, setScaleMode] = useState<'original' | 'adaptive' | 'custom'>('adaptive')
   const [showShortcuts, setShowShortcuts] = useState(false)
   const [toast, setToast] = useState<string | null>(null)
   const [unreadChat, setUnreadChat] = useState(0)
@@ -208,6 +211,7 @@ export default function Session({ peerId, role, onEnd }: Props) {
   const micSenderRef = useRef<RTCRtpSender | null>(null)
   const connTimeoutRef = useRef<ReturnType<typeof setTimeout>>()
   const infoOverlayTimerRef = useRef<ReturnType<typeof setTimeout>>()
+  const reconnectAttemptsRef = useRef(0)
 
   function diag(msg: string) {
     const ts = new Date().toISOString().slice(11, 23)
@@ -325,14 +329,16 @@ export default function Session({ peerId, role, onEnd }: Props) {
         clearTimeout(connTimeoutRef.current)
         setConnState('failed')
         invoke('update_tray_tooltip', { tooltip: 'DoomsDesk' }).catch(() => {})
-        // Agent: send disconnect and self-close after a brief delay so the
-        // agent-banner window is gone before the controller retries. Without
-        // this the banner stays open and create_agent_window silently fails.
+        // Agent: send disconnect and self-close so the controller can retry cleanly.
+        // Without this the agent banner stays open and create_agent_window silently fails.
         if (role === 'agent') {
           setTimeout(() => {
             invoke('send_signaling', { msg: { type: 'disconnect', targetId: peerId } }).catch(() => {})
             invoke('close_session').catch(() => {})
           }, 2500)
+        } else if (role === 'controller' && reconnectAttemptsRef.current < 3) {
+          // Auto-reconnect up to 3 times before showing the failure UI
+          setTimeout(() => reconnect(), 2000)
         }
       }
     }
@@ -419,8 +425,7 @@ export default function Session({ peerId, role, onEnd }: Props) {
       frameWsRef.current = null
       invoke('stop_native_capture').catch(() => {})
       setTimeout(async () => {
-        await connectFrameWs()
-        captureRestarting = false
+        try { await connectFrameWs() } finally { captureRestarting = false }
       }, 500)
     }
 
@@ -536,6 +541,10 @@ export default function Session({ peerId, role, onEnd }: Props) {
           } else {
             diag('quality preset: auto (adaptive)')
           }
+        } else if (msg.type === 'set_codec') {
+          const codec = (msg.codec as string) ?? 'auto'
+          invoke('set_codec', { codec }).catch(() => {})
+          diag(`codec → ${codec}`)
         } else if (msg.type === 'request_keyframe') {
           invoke('request_keyframe').catch(() => {})
           diag('keyframe requested by controller')
@@ -1006,10 +1015,21 @@ export default function Session({ peerId, role, onEnd }: Props) {
   }
 
   function reconnect() {
-    // A full reconnect requires re-establishing the signaling session (new offer/answer).
-    // We can't do that from inside Session — handleEnd sends disconnect, routes to Home,
-    // where the device is in recents and one click reconnects.
-    handleEnd()
+    reconnectAttemptsRef.current++
+    if (reconnectAttemptsRef.current > 3) {
+      handleEnd()
+      return
+    }
+    diag(`reconnecting (attempt ${reconnectAttemptsRef.current}/3)`)
+    cleanup(true)
+    setConnState('connecting')
+    setInitError('')
+    initSession().catch((err) => {
+      const msg = String(err?.message ?? err)
+      diag(`reconnect failed: ${msg}`)
+      setConnState('failed')
+      if (role !== 'agent') setInitError(msg)
+    })
   }
 
   function formatDuration(s: number) {
@@ -1170,6 +1190,19 @@ export default function Session({ peerId, role, onEnd }: Props) {
     setQualityPreset(preset)
     const dc = dcRef.current
     if (dc?.readyState === 'open') dc.send(JSON.stringify({ type: 'set_quality', preset }))
+  }
+
+  function applyCodecPreset(codec: typeof codecPreset) {
+    setCodecPreset(codec)
+    const dc = dcRef.current
+    if (dc?.readyState === 'open') dc.send(JSON.stringify({ type: 'set_codec', codec }))
+  }
+
+  function applyScaleMode(mode: typeof scaleMode) {
+    setScaleMode(mode)
+    if (mode === 'original') { setZoom(1); setStretch(false) }
+    else if (mode === 'adaptive') { setStretch(true) }
+    else { setStretch(false) }
   }
 
   function pickAndSendFile() {
@@ -1340,19 +1373,27 @@ export default function Session({ peerId, role, onEnd }: Props) {
         <div className="flex-1" />
 
         <div className="flex items-center gap-1">
-          <ToolBtn onClick={() => setZoom((z) => Math.max(0.5, z - 0.25))} title="Zoom out">
-            <ZoomOut size={14} />
-          </ToolBtn>
-          <span className="text-xs text-slate-500 w-8 text-center">{Math.round(zoom * 100)}%</span>
-          <ToolBtn onClick={() => setZoom((z) => Math.min(3, z + 0.25))} title="Zoom in">
-            <ZoomIn size={14} />
-          </ToolBtn>
-
-          <div className="w-px h-4 bg-surface-border mx-1" />
-
-          <ToolBtn onClick={() => setStretch((s) => !s)} title="Stretch to fit" active={stretch}>
-            {stretch ? <Shrink size={14} /> : <Expand size={14} />}
-          </ToolBtn>
+          <select
+            value={scaleMode}
+            onChange={(e) => applyScaleMode(e.target.value as typeof scaleMode)}
+            title="Display scaling"
+            className="text-xs bg-surface text-slate-300 border border-surface-border rounded px-1.5 py-0.5 cursor-pointer"
+          >
+            <option value="original">Original</option>
+            <option value="adaptive">Adaptive</option>
+            <option value="custom">Custom</option>
+          </select>
+          {scaleMode === 'custom' && (
+            <>
+              <ToolBtn onClick={() => setZoom((z) => Math.max(0.5, z - 0.25))} title="Zoom out">
+                <ZoomOut size={14} />
+              </ToolBtn>
+              <span className="text-xs text-slate-500 w-8 text-center">{Math.round(zoom * 100)}%</span>
+              <ToolBtn onClick={() => setZoom((z) => Math.min(3, z + 0.25))} title="Zoom in">
+                <ZoomIn size={14} />
+              </ToolBtn>
+            </>
+          )}
 
           <div className="w-px h-4 bg-surface-border mx-1" />
 
@@ -1406,11 +1447,21 @@ export default function Session({ peerId, role, onEnd }: Props) {
             className="text-xs bg-surface text-slate-300 border border-surface-border rounded px-1.5 py-0.5 cursor-pointer"
           >
             <option value="auto">Auto</option>
-            <option value="lan">LAN (16 Mbps)</option>
-            <option value="wan">WAN (4 Mbps)</option>
-            <option value="low">Low (2 Mbps)</option>
+            <option value="lan">Good (High Quality)</option>
+            <option value="wan">Balanced</option>
+            <option value="low">Optimised (Reaction Time)</option>
           </select>
 
+          <select
+            value={codecPreset}
+            onChange={(e) => applyCodecPreset(e.target.value as typeof codecPreset)}
+            title="Video codec"
+            className="text-xs bg-surface text-slate-300 border border-surface-border rounded px-1.5 py-0.5 cursor-pointer"
+          >
+            <option value="auto">Auto</option>
+            <option value="h264">H.264</option>
+            <option value="h265">H.265</option>
+          </select>
           {sessionStats?.codec && (
             <span
               className={`text-xs font-mono px-1.5 py-0.5 rounded select-none ${
@@ -1480,6 +1531,13 @@ export default function Session({ peerId, role, onEnd }: Props) {
             active={keyPassthrough}
           >
             <Keyboard size={14} />
+          </ToolBtn>
+          <ToolBtn
+            onClick={() => setMousePassthrough((v) => !v)}
+            title={mousePassthrough ? 'Mouse pass-through ON — click to disable (interact locally)' : 'Mouse pass-through OFF — mouse stays local'}
+            active={mousePassthrough}
+          >
+            {mousePassthrough ? <Mouse size={14} /> : <MousePointerBan size={14} />}
           </ToolBtn>
 
           {/* Remote actions dropdown */}
@@ -1866,6 +1924,7 @@ export default function Session({ peerId, role, onEnd }: Props) {
           onRecordingChunk={handleRecordingDone}
           pointerLockEnabled={pointerLockEnabled}
           keyPassthrough={keyPassthrough}
+          mousePassthrough={mousePassthrough}
           onLocalZoom={(delta) => setZoom((z) => Math.min(3, Math.max(0.5, Math.round((z + delta) * 10) / 10)))}
           onStats={(s) => {
             setSessionStats(s)

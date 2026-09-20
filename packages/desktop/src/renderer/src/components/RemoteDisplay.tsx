@@ -11,11 +11,12 @@ interface Props {
   onRecordingChunk?: (blob: Blob) => void
   pointerLockEnabled?: boolean
   keyPassthrough?: boolean
+  mousePassthrough?: boolean
   onLocalZoom?: (delta: number) => void
   onStats?: (stats: { fps: number; decodeMs: number; codec: string }) => void
 }
 
-export default function RemoteDisplay({ framesChannel, dataChannel, remoteScreenSize, zoom, stretch, connState, recording, onRecordingChunk, pointerLockEnabled = false, keyPassthrough = true, onLocalZoom, onStats }: Props) {
+export default function RemoteDisplay({ framesChannel, dataChannel, remoteScreenSize, zoom, stretch, connState, recording, onRecordingChunk, pointerLockEnabled = false, keyPassthrough = true, mousePassthrough = true, onLocalZoom, onStats }: Props) {
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const containerRef = useRef<HTMLDivElement>(null)
   const imeRef = useRef<HTMLTextAreaElement>(null)
@@ -370,6 +371,7 @@ export default function RemoteDisplay({ framesChannel, dataChannel, remoteScreen
   }, [])
 
   const onMouseMove = useCallback((e: React.MouseEvent) => {
+    if (!mousePassthrough) return
     const now = Date.now()
     if (now - lastMoveSentRef.current < 16) return // ~60hz mouse move
     lastMoveSentRef.current = now
@@ -382,7 +384,7 @@ export default function RemoteDisplay({ framesChannel, dataChannel, remoteScreen
       lastCursorPosRef.current = { x, y }
       sendInput({ type: 'mousemove', x, y })
     }
-  }, [dataChannel, remoteScreenSize, stretch])
+  }, [dataChannel, remoteScreenSize, stretch, mousePassthrough])
 
   function remoteButton(b: number): string {
     if (b === 1) return 'middle'
@@ -393,6 +395,7 @@ export default function RemoteDisplay({ framesChannel, dataChannel, remoteScreen
   }
 
   const onMouseDown = useCallback((e: React.MouseEvent) => {
+    if (!mousePassthrough) return
     e.preventDefault()
     containerRef.current?.focus()
     // Request pointer lock on left click when enabled
@@ -406,9 +409,10 @@ export default function RemoteDisplay({ framesChannel, dataChannel, remoteScreen
     } else {
       sendInput({ type: 'mousedown', x: 0, y: 0, button })
     }
-  }, [dataChannel, remoteScreenSize, stretch, pointerLockEnabled])
+  }, [dataChannel, remoteScreenSize, stretch, pointerLockEnabled, mousePassthrough])
 
   const onMouseUp = useCallback((e: React.MouseEvent) => {
+    if (!mousePassthrough) return
     e.preventDefault()
     const button = remoteButton(e.button)
     if (pointerLockedRef.current) {
@@ -417,11 +421,12 @@ export default function RemoteDisplay({ framesChannel, dataChannel, remoteScreen
       const { x, y } = toRemote(e)
       sendInput({ type: 'mouseup', x, y, button })
     }
-  }, [dataChannel, remoteScreenSize, stretch])
+  }, [dataChannel, remoteScreenSize, stretch, mousePassthrough])
 
-  const onContextMenu = useCallback((e: React.MouseEvent) => { e.preventDefault() }, [])
+  const onContextMenu = useCallback((e: React.MouseEvent) => { if (!mousePassthrough) return; e.preventDefault() }, [mousePassthrough])
 
   const onWheel = useCallback((e: React.WheelEvent) => {
+    if (!mousePassthrough) return
     e.preventDefault()
     // Ctrl/Cmd + scroll → local zoom (trackpad pinch, or Ctrl+scroll)
     if (e.ctrlKey || e.metaKey) {
@@ -492,13 +497,14 @@ export default function RemoteDisplay({ framesChannel, dataChannel, remoteScreen
   }, [dataChannel, keyPassthrough])
 
   const onMouseLeave = useCallback((e: React.MouseEvent) => {
+    if (!mousePassthrough) return
     if (e.buttons !== 0) {
       const { x, y } = toRemote(e)
       // e.buttons is a bitmask: 1=left, 2=right, 4=middle, 8=back, 16=forward
       const button = e.buttons === 2 ? 'right' : e.buttons === 4 ? 'middle' : e.buttons === 8 ? 'back' : e.buttons === 16 ? 'forward' : 'left'
       sendInput({ type: 'mouseup', x, y, button })
     }
-  }, [dataChannel, remoteScreenSize, stretch])
+  }, [dataChannel, remoteScreenSize, stretch, mousePassthrough])
 
   const canvasStyle: React.CSSProperties = {
     width: '100%',

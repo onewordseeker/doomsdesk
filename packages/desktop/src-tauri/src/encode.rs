@@ -28,7 +28,12 @@ pub struct H264Encoder {
 impl H264Encoder {
     /// Create an encoder. On macOS tries HEVC first, falls back to H.264.
     pub fn new(width: u32, height: u32) -> Option<Self> {
-        platform::Encoder::new(width, height).map(|inner| Self { inner, width, height })
+        Self::new_with_codec(width, height, None)
+    }
+
+    /// Create with an explicit codec override. `None` = auto (HEVC first on macOS).
+    pub fn new_with_codec(width: u32, height: u32, prefer: Option<CodecType>) -> Option<Self> {
+        platform::Encoder::new_with_codec(width, height, prefer).map(|inner| Self { inner, width, height })
     }
 
     pub fn dimensions(&self) -> (u32, u32) {
@@ -434,23 +439,43 @@ mod platform {
 
     impl Encoder {
         pub fn new(width: u32, height: u32) -> Option<Self> {
+            Self::new_with_codec(width, height, None)
+        }
+
+        pub fn new_with_codec(width: u32, height: u32, prefer: Option<super::CodecType>) -> Option<Self> {
             let (tx, rx) = mpsc::sync_channel::<EncodedFrame>(4);
 
-            // The CallbackCtx starts as H265; we may patch it to H264 below.
             let mut ctx = Box::new(CallbackCtx { tx, codec: CodecType::H265 });
             let ctx_ptr = &mut *ctx as *mut CallbackCtx as *mut c_void;
 
-            // Try HEVC first; fall back to H.264 if the session cannot be created
-            // (e.g., unsupported hardware or OS older than macOS 11).
-            let (session, codec) =
-                if let Some(s) = try_create_session(width, height, kCMVideoCodecType_HEVC, ctx_ptr) {
-                    (s, CodecType::H265)
-                } else if let Some(s) = try_create_session(width, height, kCMVideoCodecType_H264, ctx_ptr) {
+            let (session, codec) = match prefer {
+                Some(super::CodecType::H264) => {
+                    // Caller explicitly wants H.264
+                    let s = try_create_session(width, height, kCMVideoCodecType_H264, ctx_ptr)?;
                     ctx.codec = CodecType::H264;
                     (s, CodecType::H264)
-                } else {
-                    return None;
-                };
+                }
+                Some(super::CodecType::H265) => {
+                    // Caller explicitly wants H.265; fall back to H.264 if unavailable
+                    if let Some(s) = try_create_session(width, height, kCMVideoCodecType_HEVC, ctx_ptr) {
+                        (s, CodecType::H265)
+                    } else {
+                        let s = try_create_session(width, height, kCMVideoCodecType_H264, ctx_ptr)?;
+                        ctx.codec = CodecType::H264;
+                        (s, CodecType::H264)
+                    }
+                }
+                None => {
+                    // Auto: try HEVC first, fall back to H.264
+                    if let Some(s) = try_create_session(width, height, kCMVideoCodecType_HEVC, ctx_ptr) {
+                        (s, CodecType::H265)
+                    } else {
+                        let s = try_create_session(width, height, kCMVideoCodecType_H264, ctx_ptr)?;
+                        ctx.codec = CodecType::H264;
+                        (s, CodecType::H264)
+                    }
+                }
+            };
 
             unsafe { configure_session(session, codec, width, height); }
 
