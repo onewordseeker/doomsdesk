@@ -94,7 +94,12 @@ export default function Home() {
             const cleanId = digits.length === 9
               ? `${digits.slice(0, 3)}-${digits.slice(3, 6)}-${digits.slice(6, 9)}`
               : digits
-            const pw = rememberPwRef.current ? connectPwRef.current : undefined
+            // Preserve an already-saved password unless the user explicitly
+            // checked "remember password" for this connection attempt.
+            // Without this, connecting from history (rememberPw=false) would
+            // overwrite the stored password with undefined on every connect.
+            const existingPw = loadRecents().find((d) => d.id === cleanId)?.savedPassword
+            const pw = rememberPwRef.current ? connectPwRef.current : existingPw
             upsertRecent(cleanId, pw)
             setRecentDevices(loadRecents())
           }

@@ -325,6 +325,15 @@ export default function Session({ peerId, role, onEnd }: Props) {
         clearTimeout(connTimeoutRef.current)
         setConnState('failed')
         invoke('update_tray_tooltip', { tooltip: 'DoomsDesk' }).catch(() => {})
+        // Agent: send disconnect and self-close after a brief delay so the
+        // agent-banner window is gone before the controller retries. Without
+        // this the banner stays open and create_agent_window silently fails.
+        if (role === 'agent') {
+          setTimeout(() => {
+            invoke('send_signaling', { msg: { type: 'disconnect', targetId: peerId } }).catch(() => {})
+            invoke('close_session').catch(() => {})
+          }, 2500)
+        }
       }
     }
 
@@ -1004,20 +1013,11 @@ export default function Session({ peerId, role, onEnd }: Props) {
     setDataChannel(null)
   }
 
-  async function reconnect() {
-    setDiagLines((prev) => [...prev, '─────── reconnecting ───────'])
-    cleanup(true) // keep duration counter running
-    pendingTransfersRef.current.clear()
-    setMicActive(false)
-    setFileTransfers([])
-    setConnState('connecting')
-    setInitError('')
-    await new Promise((r) => setTimeout(r, 600))
-    initSession().catch((err) => {
-      const msg = String(err?.message ?? err)
-      diag(`RECONNECT ERROR: ${msg}`)
-      if (role !== 'agent') setInitError(msg)
-    })
+  function reconnect() {
+    // A full reconnect requires re-establishing the signaling session (new offer/answer).
+    // We can't do that from inside Session — handleEnd sends disconnect, routes to Home,
+    // where the device is in recents and one click reconnects.
+    handleEnd()
   }
 
   function formatDuration(s: number) {

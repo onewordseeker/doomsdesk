@@ -215,52 +215,64 @@ async fn handle_message(
 }
 
 pub fn create_agent_window(app: &AppHandle, peer_id: &str) {
-    let url = format!("/?peer={}&role=agent", peer_id);
+    let app_c = app.clone();
+    let pid = peer_id.to_string();
 
-    if let Some(main) = app.get_webview_window("main") {
-        let _ = main.hide();
-    }
+    // Spawn so we can async-close a stale window before creating the new one.
+    // This handles the case where a previous (failed/disconnected) session left
+    // the agent-banner open — WebviewWindowBuilder returns an error if the label
+    // already exists, silently dropping the new session.
+    tauri::async_runtime::spawn(async move {
+        if let Some(old) = app_c.get_webview_window("agent-banner") {
+            let _ = old.close();
+            // Give Tauri time to destroy the old webview before we recreate it.
+            tokio::time::sleep(tokio::time::Duration::from_millis(350)).await;
+        }
 
-    match tauri::WebviewWindowBuilder::new(
-        app,
-        "agent-banner",
-        tauri::WebviewUrl::App(url.into()),
-    )
-    .title("DoomsDesk — Remote Session")
-    .inner_size(320.0, 72.0)
-    .decorations(false)
-    .skip_taskbar(false)
-    .resizable(true)
-    .always_on_top(true)
-    .visible(true)
-    .focused(false)
-    .build()
-    {
-        Ok(win) => {
-            // Position at top-right of primary monitor
-            if let (Ok(sf), Ok(mon)) = (win.scale_factor(), win.current_monitor()) {
-                if let Some(m) = mon {
-                    let pos = m.position();
-                    let size = m.size();
-                    let w = (320.0 * sf) as i32;
-                    let margin = (16.0 * sf) as i32;
-                    let x = pos.x + size.width as i32 - w - margin;
-                    let y = pos.y + margin;
-                    let _ = win.set_position(tauri::PhysicalPosition::new(x, y));
-                }
-            }
-            // Safety net: restore main window if agent banner is closed unexpectedly
-            let app_clone = app.clone();
-            win.on_window_event(move |event| {
-                if matches!(event, tauri::WindowEvent::Destroyed) {
-                    if let Some(main) = app_clone.get_webview_window("main") {
-                        let _ = main.show();
+        if let Some(main) = app_c.get_webview_window("main") {
+            let _ = main.hide();
+        }
+
+        let url = format!("/?peer={}&role=agent", pid);
+        match tauri::WebviewWindowBuilder::new(
+            &app_c,
+            "agent-banner",
+            tauri::WebviewUrl::App(url.into()),
+        )
+        .title("DoomsDesk — Remote Session")
+        .inner_size(320.0, 72.0)
+        .decorations(false)
+        .skip_taskbar(false)
+        .resizable(true)
+        .always_on_top(true)
+        .visible(true)
+        .focused(false)
+        .build()
+        {
+            Ok(win) => {
+                if let (Ok(sf), Ok(mon)) = (win.scale_factor(), win.current_monitor()) {
+                    if let Some(m) = mon {
+                        let pos = m.position();
+                        let size = m.size();
+                        let w = (320.0 * sf) as i32;
+                        let margin = (16.0 * sf) as i32;
+                        let x = pos.x + size.width as i32 - w - margin;
+                        let y = pos.y + margin;
+                        let _ = win.set_position(tauri::PhysicalPosition::new(x, y));
                     }
                 }
-            });
+                let app_clone = app_c.clone();
+                win.on_window_event(move |event| {
+                    if matches!(event, tauri::WindowEvent::Destroyed) {
+                        if let Some(main) = app_clone.get_webview_window("main") {
+                            let _ = main.show();
+                        }
+                    }
+                });
+            }
+            Err(e) => eprintln!("[signaling] agent window error: {}", e),
         }
-        Err(e) => eprintln!("[signaling] agent window error: {}", e),
-    }
+    });
 }
 
 pub fn close_agent_window(app: &AppHandle) {
