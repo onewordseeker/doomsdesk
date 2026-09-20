@@ -28,6 +28,9 @@ import {
   Camera,
   Video,
   VideoOff,
+  Keyboard,
+  Volume2,
+  VolumeX,
 } from 'lucide-react';
 import clsx from 'clsx';
 
@@ -127,6 +130,10 @@ function ViewerInner() {
   const [frozen, setFrozen] = useState(false);
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [isRecording, setIsRecording] = useState(false);
+  const [audioEnabled, setAudioEnabled] = useState(true);
+  const [showSendKeys, setShowSendKeys] = useState(false);
+  const [remoteMonitors, setRemoteMonitors] = useState<Array<{ id: number; width: number; height: number; isMain: boolean }>>([]);
+  const [selectedMonitor, setSelectedMonitor] = useState(0);
 
   // Recording refs
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
@@ -149,6 +156,7 @@ function ViewerInner() {
   const detectedCodecRef = useRef<string>('');
   const codecTypeRef = useRef<'h264' | 'h265' | null>(null);
   const remoteScreenRef = useRef<{ w: number; h: number }>({ w: 1920, h: 1080 });
+  const audioElRef = useRef<HTMLAudioElement | null>(null);
 
   // ---------------------------------------------------------------------------
   // Cleanup
@@ -181,8 +189,16 @@ function ViewerInner() {
     detectedCodecRef.current = '';
     codecTypeRef.current = null;
     remoteScreenRef.current = { w: 1920, h: 1080 };
+    if (audioElRef.current) {
+      audioElRef.current.srcObject = null;
+      audioElRef.current.remove();
+      audioElRef.current = null;
+    }
     setFrozen(false);
     setStats({ fps: 0, codec: '' });
+    setRemoteMonitors([]);
+    setSelectedMonitor(0);
+    setShowSendKeys(false);
     // Stop any active recording
     if (mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
       mediaRecorderRef.current.stop();
@@ -351,6 +367,8 @@ function ViewerInner() {
           const msg = JSON.parse(ev.data as string);
           if (msg.type === 'screen_info' && typeof msg.width === 'number' && typeof msg.height === 'number') {
             remoteScreenRef.current = { w: msg.width, h: msg.height };
+          } else if (msg.type === 'monitor_list' && Array.isArray(msg.monitors)) {
+            setRemoteMonitors(msg.monitors as Array<{ id: number; width: number; height: number; isMain: boolean }>);
           } else if (msg.type === 'agent_clipboard' && typeof msg.text === 'string') {
             navigator.clipboard.writeText(msg.text).catch(() => {});
           }
@@ -391,6 +409,20 @@ function ViewerInner() {
 
   function createPeerConnection() {
     const pc = new RTCPeerConnection({ iceServers: ICE_SERVERS });
+
+    pc.ontrack = (ev) => {
+      if (ev.track.kind === 'audio') {
+        if (!audioElRef.current) {
+          const el = document.createElement('audio');
+          el.autoplay = true;
+          el.style.display = 'none';
+          document.body.appendChild(el);
+          audioElRef.current = el;
+        }
+        audioElRef.current.srcObject = ev.streams[0];
+        audioElRef.current.muted = !audioEnabled;
+      }
+    };
 
     pc.onicecandidate = (ev) => {
       if (ev.candidate && wsRef.current?.readyState === WebSocket.OPEN) {
@@ -682,6 +714,22 @@ function ViewerInner() {
     sendInput({ type: 'request_clipboard' });
   }
 
+  function sendKeysCombo(combo: string) {
+    sendInput({ type: 'send_keys', combo });
+    setShowSendKeys(false);
+  }
+
+  function switchMonitor(displayId: number) {
+    setSelectedMonitor(displayId);
+    sendInput({ type: 'switch_monitor', displayId });
+  }
+
+  function toggleAudio() {
+    const el = audioElRef.current;
+    if (el) el.muted = audioEnabled; // audioEnabled is current value before toggle
+    setAudioEnabled((prev) => !prev);
+  }
+
   // ---------------------------------------------------------------------------
   // Fullscreen
   // ---------------------------------------------------------------------------
@@ -893,6 +941,22 @@ function ViewerInner() {
 
             {/* Right: controls */}
             <div className="flex items-center gap-1">
+              {/* Monitor selector */}
+              {remoteMonitors.length > 1 && (
+                <select
+                  value={selectedMonitor}
+                  onChange={(e) => switchMonitor(Number(e.target.value))}
+                  title="Switch monitor"
+                  className="h-7 px-1.5 rounded-lg text-[11px] bg-dark-surface border border-dark-border text-dark-text hover:border-accent/50 transition-colors cursor-pointer"
+                >
+                  {remoteMonitors.map((m) => (
+                    <option key={m.id} value={m.id}>
+                      {m.isMain ? 'Main' : `Display ${m.id}`} ({m.width}×{m.height})
+                    </option>
+                  ))}
+                </select>
+              )}
+
               <button
                 onClick={pushClipboard}
                 title="Push local clipboard → remote (Ctrl+V)"
@@ -907,6 +971,59 @@ function ViewerInner() {
               >
                 <ClipboardCopy size={14} />
               </button>
+
+              {/* Send Keys dropdown */}
+              <div className="relative">
+                <button
+                  onClick={() => setShowSendKeys((v) => !v)}
+                  title="Send key combos"
+                  className={clsx(
+                    'p-1.5 rounded-lg transition-colors',
+                    showSendKeys
+                      ? 'text-accent bg-accent/15'
+                      : 'text-dark-muted hover:text-dark-text hover:bg-dark-border/40'
+                  )}
+                >
+                  <Keyboard size={14} />
+                </button>
+                {showSendKeys && (
+                  <>
+                    <div className="fixed inset-0 z-40" onClick={() => setShowSendKeys(false)} />
+                    <div className="absolute right-0 top-full mt-1 z-50 min-w-[160px] bg-dark-surface border border-dark-border rounded-xl shadow-2xl py-1 overflow-hidden">
+                      {[
+                        { label: 'Ctrl+Alt+Del', combo: 'ctrl_alt_del' },
+                        { label: 'Lock Screen', combo: 'lock' },
+                        { label: 'Start / Spotlight', combo: 'spotlight_or_start' },
+                        { label: 'Show Desktop', combo: 'show_desktop' },
+                        { label: 'Task Manager', combo: 'task_mgr' },
+                      ].map(({ label, combo }) => (
+                        <button
+                          key={combo}
+                          onClick={() => sendKeysCombo(combo)}
+                          className="w-full text-left px-3 py-1.5 text-xs text-dark-text hover:bg-dark-border/40 transition-colors"
+                        >
+                          {label}
+                        </button>
+                      ))}
+                    </div>
+                  </>
+                )}
+              </div>
+
+              {/* Audio toggle */}
+              <button
+                onClick={toggleAudio}
+                title={audioEnabled ? 'Mute remote audio' : 'Unmute remote audio'}
+                className={clsx(
+                  'p-1.5 rounded-lg transition-colors',
+                  audioEnabled
+                    ? 'text-dark-muted hover:text-dark-text hover:bg-dark-border/40'
+                    : 'text-warning bg-warning/10 hover:bg-warning/20'
+                )}
+              >
+                {audioEnabled ? <Volume2 size={14} /> : <VolumeX size={14} />}
+              </button>
+
               <button
                 onClick={takeScreenshot}
                 title="Take screenshot"

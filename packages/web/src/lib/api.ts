@@ -202,6 +202,9 @@ export async function changePassword(currentPassword: string, newPassword: strin
 }
 
 export async function logout(): Promise<void> {
+  try {
+    await request('/auth/logout', { method: 'POST' });
+  } catch { /* ignore — token may already be expired */ }
   clearToken();
 }
 
@@ -315,7 +318,7 @@ export async function removeTeamMember(teamId: string, userId: string): Promise<
 
 export async function updateMemberRole(teamId: string, userId: string, role: string): Promise<{ member: TeamMember }> {
   return request<{ member: TeamMember }>(`/teams/${teamId}/members/${userId}`, {
-    method: 'PATCH',
+    method: 'PUT',
     body: JSON.stringify({ role }),
   });
 }

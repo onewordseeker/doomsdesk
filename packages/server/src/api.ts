@@ -208,6 +208,13 @@ export function createApiRouter(signaling: SignalingServer): Router {
     res.json({ token, user: toPublicUser(user) });
   });
 
+  /** POST /api/auth/logout */
+  router.post('/auth/logout', requireAuth, (req: AuthRequest, res: Response) => {
+    const ip = (req.headers['x-forwarded-for'] as string | undefined)?.split(',')[0]?.trim() ?? req.socket.remoteAddress ?? 'unknown';
+    createAuditLog(req.userId!, null, 'logout', 'auth', undefined, ip);
+    res.status(204).end();
+  });
+
   /** GET /api/auth/me */
   router.get('/auth/me', requireAuth, (req: AuthRequest, res: Response) => {
     const user = getUserById(req.userId!);
