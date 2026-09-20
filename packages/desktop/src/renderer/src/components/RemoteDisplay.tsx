@@ -238,6 +238,8 @@ export default function RemoteDisplay({ framesChannel, dataChannel, remoteScreen
       const isKey = isKeyFrame(data, activeCodec)
 
       if (decoder.state !== 'closed') {
+        // Drop non-keyframes when the decoder is backed up — never let the queue grow
+        if (!isKey && decoder.decodeQueueSize > 2) return
         try {
           decoder.decode(new EncodedVideoChunk({
             type: isKey ? 'key' : 'delta',

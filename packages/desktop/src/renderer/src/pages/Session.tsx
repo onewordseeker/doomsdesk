@@ -377,7 +377,7 @@ export default function Session({ peerId, role, onEnd }: Props) {
         if (ev.data.byteLength === 0) return
         consecutiveErrors = 0
         if (framesDc.readyState !== 'open') return
-        if (framesDc.bufferedAmount > 262144) {
+        if (framesDc.bufferedAmount > 524288) {
           framesSkipped++
           consecutiveDrops++
           if (consecutiveDrops === 3) {
@@ -527,7 +527,7 @@ export default function Session({ peerId, role, onEnd }: Props) {
             sendChunk()
           }).catch((e) => diag(`screenshot err: ${e}`))
         } else if (msg.type === 'set_quality') {
-          const presetBps: Record<string, number> = { lan: 16_000_000, wan: 4_000_000, low: 2_000_000 }
+          const presetBps: Record<string, number> = { lan: 50_000_000, wan: 8_000_000, low: 2_000_000 }
           qualityPinBps = presetBps[msg.preset as string] ?? 0
           if (qualityPinBps > 0) {
             currentBps = qualityPinBps
@@ -629,8 +629,8 @@ export default function Session({ peerId, role, onEnd }: Props) {
           diag(`bitrate ↓ ${(currentBps / 1_000_000).toFixed(1)} Mbps (skip=${Math.round(skipRate * 100)}% rtt=${rtt}ms)`)
         } else if (skipRate === 0 && !rttMarginal && !rttPoor) {
           stableWindows++
-          if (stableWindows >= 2 && currentBps < 16_000_000) {
-            currentBps = Math.min(16_000_000, Math.round(currentBps * 1.2))
+          if (stableWindows >= 2 && currentBps < 50_000_000) {
+            currentBps = Math.min(50_000_000, Math.round(currentBps * 1.2))
             invoke('set_capture_bitrate', { bps: currentBps }).catch(() => {})
             stableWindows = 0
             diag(`bitrate ↑ ${(currentBps / 1_000_000).toFixed(1)} Mbps`)

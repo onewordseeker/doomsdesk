@@ -389,7 +389,7 @@ mod platform {
         VTSessionSetProperty(session, kVTCompressionPropertyKey_MaxKeyFrameInterval, v as CFTypeRef);
         CFRelease(v as *const c_void);
 
-        let v = cf_i32(30);
+        let v = cf_i32(60);
         VTSessionSetProperty(session, kVTCompressionPropertyKey_ExpectedFrameRate, v as CFTypeRef);
         CFRelease(v as *const c_void);
 

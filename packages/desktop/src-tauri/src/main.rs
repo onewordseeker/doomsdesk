@@ -1,6 +1,15 @@
 // Prevents additional console window on Windows in release
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+// Windows: 1 ms timer resolution so thread::sleep is accurate for frame timing.
+// Without this, Windows defaults to 15.6 ms resolution — 30 fps is impossible.
+#[cfg(target_os = "windows")]
+#[link(name = "winmm")]
+extern "system" {
+    fn timeBeginPeriod(uPeriod: u32) -> u32;
+    fn timeEndPeriod(uPeriod: u32) -> u32;
+}
+
 mod capture;
 mod config;
 mod encode;
@@ -494,6 +503,10 @@ async fn start_native_capture(app: AppHandle, state: State<'_, AppState>) -> Res
     tauri::async_runtime::spawn_blocking(move || {
         use screenshots::image::{DynamicImage, imageops::FilterType, RgbaImage};
 
+        // Raise Windows timer resolution to 1 ms for accurate frame-interval sleep.
+        #[cfg(target_os = "windows")]
+        unsafe { timeBeginPeriod(1); }
+
         let mut encoder: Option<encode::H264Encoder> = None;
         let mut differ = capture::FrameDiffer::new();
         let mut pts_ms: u64 = 0;
@@ -505,7 +518,9 @@ async fn start_native_capture(app: AppHandle, state: State<'_, AppState>) -> Res
 
         loop {
             if gen_ref.load(Ordering::SeqCst) != my_gen {
-                let _ = frame_tx2.send(vec![]); // signal WS clients to close
+                let _ = frame_tx2.send(vec![]);
+                #[cfg(target_os = "windows")]
+                unsafe { timeEndPeriod(1); }
                 break;
             }
 
