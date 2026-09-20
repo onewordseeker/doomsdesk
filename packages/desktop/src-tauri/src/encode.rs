@@ -614,6 +614,11 @@ mod platform {
 
     impl Encoder {
         pub fn new(width: u32, height: u32) -> Option<Self> {
+            Self::new_with_codec(width, height, None)
+        }
+
+        // openh264 only supports H.264 — codec preference is ignored on Windows
+        pub fn new_with_codec(width: u32, height: u32, _prefer: Option<super::CodecType>) -> Option<Self> {
             let bps = ((width as u64 * height as u64 * 8_000_000) / (1920 * 1080))
                 .clamp(3_000_000, 50_000_000) as u32;
             let enc = make_encoder(width, height, bps)?;
@@ -664,6 +669,7 @@ mod platform {
 
     impl Encoder {
         pub fn new(_w: u32, _h: u32) -> Option<Self> { None }
+        pub fn new_with_codec(_w: u32, _h: u32, _prefer: Option<super::CodecType>) -> Option<Self> { None }
         pub fn codec_name(&self) -> &'static str { "h264" }
         pub fn encode(&mut self, _r: &[u8], _w: u32, _h: u32, _pts: u64, _force_keyframe: bool) -> Option<EncodedFrame> { None }
         pub fn set_bitrate(&mut self, _bps: u32) {}
